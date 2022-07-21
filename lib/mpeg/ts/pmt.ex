@@ -23,7 +23,7 @@ defmodule MPEG.TS.PMT do
           pcr_pid: 0..8191
         }
 
-  @spec unmarshal(binary()) :: {:ok, t()} | {:error, :malformed_entry}
+  @spec unmarshal(binary()) :: {:ok, t()} | {:error, :invalid_data}
   def unmarshal(<<
         _reserved::3,
         pcr_pid::13,
@@ -72,7 +72,7 @@ defmodule MPEG.TS.PMT do
   end
 
   defp parse_streams(_, _) do
-    {:error, :malformed_entry}
+    {:error, :invalid_data}
   end
 
   # Based on https://en.wikipedia.org/wiki/Program-specific_information#Elementary_stream_types

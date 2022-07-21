@@ -1,4 +1,4 @@
-defmodule MPEG.TSSupport do
+defmodule Support.Factory do
   @moduledoc false
   # values in this module are in hex so they can be easily validated with attached test media
   def pat, do: <<0x00, 0x01, 0xF0, 0x00>>
