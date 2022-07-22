@@ -6,7 +6,6 @@ defmodule MPEG.TS.PMTTest do
 
   # TODO: add more exhaustive tests
   describe "Program Map Table unmarshaler" do
-
     test "parses valid program map table with stream info but without program info" do
       assert {:ok, table} = PMT.unmarshal(Factory.pmt())
 

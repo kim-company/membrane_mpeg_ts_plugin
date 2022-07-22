@@ -6,15 +6,15 @@ defmodule MPEG.TS.Payload.PSI do
   alias MPEG.TS.{PAT, PMT}
 
   @type header_t :: %{
-    table_id: 0..3 | 16..31,
-    section_syntax_indicator: boolean,
-    section_length: 0..1021,
-    transport_stream_id: 0..65_535,
-    version_number: 0..31,
-    current_next_indicator: boolean,
-    section_number: 0..255,
-    last_section_number: 0..255
-  }
+          table_id: 0..3 | 16..31,
+          section_syntax_indicator: boolean,
+          section_length: 0..1021,
+          transport_stream_id: 0..65_535,
+          version_number: 0..31,
+          current_next_indicator: boolean,
+          section_number: 0..255,
+          last_section_number: 0..255
+        }
   @type t :: %__MODULE__{header: header_t(), table: PAT.t() | PMT.t()}
   defstruct [:header, :table]
 
