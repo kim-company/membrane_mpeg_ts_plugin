@@ -11,23 +11,30 @@ defmodule MPEG.TS.PES do
 
   @impl true
   def is_unmarshable?(_data, false), do: false
-  def is_unmarshable?(<<
-         1::24,
-         _stream_id::8,
-         _packet_length::16,
-        _optional_fields::bitstring
-       >>, true), do: true
+
+  def is_unmarshable?(
+        <<
+          1::24,
+          _stream_id::8,
+          _packet_length::16,
+          _optional_fields::bitstring
+        >>,
+        true
+      ),
+      do: true
 
   def is_unmarshable?(_data, _true), do: false
 
   @impl true
-  def unmarshal(<<
-         1::24,
-         stream_id::8,
-         _packet_length::16,
-         optional_fields::bitstring
-       >>, true) do
-
+  def unmarshal(
+        <<
+          1::24,
+          stream_id::8,
+          _packet_length::16,
+          optional_fields::bitstring
+        >>,
+        true
+      ) do
     # NOTE: the packet_length field might be set to zero. In that case, I don't
     # know how to assemble the PES packet back.
     #
@@ -39,7 +46,9 @@ defmodule MPEG.TS.PES do
     case parse_optional(optional_fields, stream_id) do
       {:ok, data} ->
         {:ok, %__MODULE__{data: data, stream_id: stream_id}}
-      err = {:error, _reason} -> err
+
+      err = {:error, _reason} ->
+        err
     end
   end
 

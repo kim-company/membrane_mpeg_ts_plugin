@@ -35,7 +35,6 @@ defmodule MPEG.TS.PMT do
     end
   end
 
-
   @impl true
   def unmarshal(data, is_start_unit) do
     with {:ok, %PSI{table: table}} <- PSI.unmarshal(data, is_start_unit),
