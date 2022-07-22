@@ -1,5 +1,5 @@
 defmodule MPEG.TS.Packet do
-  alias MPEG.TS.Payload.{PSI, ES, Empty}
+  alias MPEG.TS.Payload.{PSI, PES, Empty}
 
   @ts_packet_size 188
   @ts_header_size 4
@@ -9,7 +9,7 @@ defmodule MPEG.TS.Packet do
 
   @type payload_id_t :: :psi | :null_packet | :unsupported
 
-  @type payload_t :: PSI.t() | ES.t() | Empty.t()
+  @type payload_t :: PSI.t() | PES.t() | Empty.t()
   @type t :: %__MODULE__{
           payload: payload_t()
         }
@@ -46,6 +46,8 @@ defmodule MPEG.TS.Packet do
     do: {:error, :not_enough_data}
 
   def unmarshal(_data), do: {:error, :invalid_data}
+
+  def packet_size(), do: @ts_packet_size
 
   defp parse_adaptation_field(0b01), do: :payload
   defp parse_adaptation_field(0b10), do: :adaptation
@@ -85,5 +87,11 @@ defmodule MPEG.TS.Packet do
   defp parse_payload(_, :payload, _, _), do: {:error, :unsupported_packet}
 
   defp unmarshal_payload(<<>>), do: {:ok, %Empty{}}
-  defp unmarshal_payload(data), do: PSI.unmarshal(data)
+  defp unmarshal_payload(data) do
+    case PSI.unmarshal(data) do
+      ok = {:ok, _payload} -> ok
+      {:error, :invalid_data} -> PES.unmarshal(data)
+      err = {:error, _other} -> err
+    end
+  end
 end

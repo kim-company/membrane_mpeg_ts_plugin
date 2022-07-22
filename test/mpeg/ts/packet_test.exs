@@ -2,18 +2,30 @@ defmodule MPEG.TS.PacketTest do
   use ExUnit.Case
 
   alias MPEG.TS.Packet
-  alias MPEG.TS.Payload.PSI
+  alias MPEG.TS.Payload.{PSI, PES}
   alias Support.Factory
 
   describe "MPEG TS Packet parser" do
-    test "successfully parses a valid packet" do
+    test "handles valid PAT packet" do
       raw_data = Factory.pat_packet()
       assert {:ok, %Packet{payload: %PSI{table: %{1 => 4096}}}} = Packet.unmarshal(raw_data)
+    end
+
+    test "handles valid PMT packet" do
+      raw_data = Factory.pmt_packet()
+      assert {:ok, %Packet{payload: %PSI{table: %MPEG.TS.PMT{}}}} = Packet.unmarshal(raw_data)
     end
 
     test "asks for more data if packet is not complete but valid" do
       <<partial::160-binary, _rest::binary>> = Factory.pat_packet()
       assert {:error, :not_enough_data} = Packet.unmarshal(partial)
+    end
+
+    test "successfully parse a valid PES packet" do
+      raw_data = Factory.data_packet_video()
+      assert byte_size(raw_data) == Packet.packet_size()
+      assert {:ok, %Packet{payload: %PES{data: data}}} = Packet.unmarshal(raw_data)
+      assert byte_size(data) > 0
     end
 
     test "fails when garbage is provided" do
