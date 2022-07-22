@@ -1,4 +1,4 @@
-defmodule MPEG.TS.Payload.PSI do
+defmodule MPEG.TS.PSI do
   @moduledoc """
   Program Specific Information payload. Supported tables are PMT and PAT.
   """
@@ -21,7 +21,7 @@ defmodule MPEG.TS.Payload.PSI do
   @crc_length 4
   @remaining_header_length 5
 
-  @type unmarshal_error_t :: :invalid_data | :unsupported_table
+  @type unmarshal_error_t :: :invalid_data | :invalid_header | :unsupported_table
 
   @spec unmarshal(binary()) :: {:ok, t()} | {:error, unmarshal_error_t()}
   def unmarshal(data) do
@@ -71,7 +71,7 @@ defmodule MPEG.TS.Payload.PSI do
     {:ok, {header, rest}}
   end
 
-  def unmarshal_header(_), do: {:error, :invalid_data}
+  def unmarshal_header(_), do: {:error, :invalid_header}
 
   defp unmarshal_table(0x00, data), do: PAT.unmarshal(data)
   defp unmarshal_table(0x02, data), do: PMT.unmarshal(data)

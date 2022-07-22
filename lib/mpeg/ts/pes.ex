@@ -1,7 +1,7 @@
-defmodule MPEG.TS.Payload.PES do
+defmodule MPEG.TS.PES do
   @moduledoc """
-  Packetized Elemetary Stream Payload instance. PES packets are much larger in
-  size than TS packets are. This means that they have to be unmarshaled from a
+  Packetized Elemetary Stream. PES packets are much larger in size
+  than TS packets are. This means that they have to be unmarshaled from a
   series of payloads.
   """
   @type t :: %__MODULE__{data: binary()}
