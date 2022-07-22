@@ -7,7 +7,7 @@ defmodule MPEG.TS.PMTTest do
   # TODO: add more exhaustive tests
   describe "Program Map Table unmarshaler" do
     test "parses valid program map table with stream info but without program info" do
-      assert {:ok, table} = PMT.unmarshal(Factory.pmt())
+      assert {:ok, table} = PMT.unmarshal_table(Factory.pmt())
 
       assert %PMT{
                pcr_pid: 0x0100,
@@ -23,7 +23,7 @@ defmodule MPEG.TS.PMTTest do
       valid_pmt = Factory.pmt()
       garbage_size = byte_size(valid_pmt) - 3
       <<garbage::binary-size(garbage_size), _::binary>> = valid_pmt
-      assert {:error, :invalid_data} = PMT.unmarshal(garbage)
+      assert {:error, :invalid_data} = PMT.unmarshal_table(garbage)
     end
   end
 end

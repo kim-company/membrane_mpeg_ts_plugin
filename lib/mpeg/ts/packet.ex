@@ -8,12 +8,13 @@ defmodule MPEG.TS.Packet do
   @type scrambling_t :: :no | :even_key | :odd_key | :reserved
 
   @type pid_class_t :: :pat | :psi | :null_packet | :unsupported
+  @type pid_t :: pos_integer()
 
   @type payload_t :: bitstring()
   @type t :: %__MODULE__{
           payload: payload_t(),
           is_unit_start: boolean(),
-          pid: pos_integer(),
+          pid: pid_t(),
           continuity_counter: binary(),
           scrambling: scrambling_t(),
         }

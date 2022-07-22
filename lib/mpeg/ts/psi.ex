@@ -1,9 +1,9 @@
 defmodule MPEG.TS.PSI do
+  @behaviour MPEG.TS.Unmarshaler
+
   @moduledoc """
   Program Specific Information payload. Supported tables are PMT and PAT.
   """
-
-  alias MPEG.TS.{PAT, PMT}
 
   @type header_t :: %{
           table_id: 0..3 | 16..31,
@@ -15,25 +15,28 @@ defmodule MPEG.TS.PSI do
           section_number: 0..255,
           last_section_number: 0..255
         }
-  @type t :: %__MODULE__{header: header_t(), table: PAT.t() | PMT.t()}
+  @type t :: %__MODULE__{header: header_t(), table: bitstring()}
   defstruct [:header, :table]
 
   @crc_length 4
   @remaining_header_length 5
 
-  @type unmarshal_error_t :: :invalid_data | :invalid_header | :unsupported_table
+  @impl true
+  def is_unmarshable?(data) do
+    case unmarshal_header(data) do
+      {:ok, _} -> true
+      _ -> false
+    end
+  end
 
-  @spec unmarshal(binary()) :: {:ok, t()} | {:error, unmarshal_error_t()}
+  @impl true
   def unmarshal(data) do
     with {:ok, {header, data}} <- unmarshal_header(data) do
       content_length = header.section_length - @crc_length - @remaining_header_length
 
       case data do
         <<raw_data::binary-size(content_length), _crc::@crc_length-binary, _::binary>> ->
-          case unmarshal_table(header.table_id, raw_data) do
-            {:ok, table} -> {:ok, %__MODULE__{header: header, table: table}}
-            err = {:error, _reason} -> err
-          end
+          {:ok, %__MODULE__{header: header, table: raw_data}}
 
         _ ->
           {:error, :invalid_data}
@@ -73,7 +76,7 @@ defmodule MPEG.TS.PSI do
 
   def unmarshal_header(_), do: {:error, :invalid_header}
 
-  defp unmarshal_table(0x00, data), do: PAT.unmarshal(data)
-  defp unmarshal_table(0x02, data), do: PMT.unmarshal(data)
-  defp unmarshal_table(_, _data), do: {:error, :unsupported_table}
+  # defp parse_table_id(0x00), do: :pat
+  # defp parse_table_id(0x02), do: :pmt
+  # defp parse_table_id(_), do: :other
 end

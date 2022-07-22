@@ -4,8 +4,6 @@ defmodule MPEG.TS.PacketTest do
   alias MPEG.TS.Packet
   alias Support.Factory
 
-  @all_packets_path "./test/fixtures/all_packets.ts"
-
   describe "MPEG TS Packet parser" do
     test "handles valid PAT packet" do
       raw_data = Factory.pat_packet()
