@@ -16,7 +16,7 @@ defmodule MPEG.TS.Packet do
           is_unit_start: boolean(),
           pid: pid_t(),
           continuity_counter: binary(),
-          scrambling: scrambling_t(),
+          scrambling: scrambling_t()
         }
   defstruct [:payload, :is_unit_start, :pid, :continuity_counter, :scrambling]
 
@@ -40,14 +40,14 @@ defmodule MPEG.TS.Packet do
          pusi = parse_pusi(payload_unit_start_indicator),
          scrambling = parse_scrambling_control(transport_scrambling_control),
          {:ok, data} <- parse_payload(optional_fields, adaptation_field_id, pid_class, pusi) do
-
-      {:ok, %__MODULE__{
-        is_unit_start: pusi,
-        pid: pid,
-        payload: data,
-        scrambling: scrambling,
-        continuity_counter: continuity_counter,
-      }}
+      {:ok,
+       %__MODULE__{
+         is_unit_start: pusi,
+         pid: pid,
+         payload: data,
+         scrambling: scrambling,
+         continuity_counter: continuity_counter
+       }}
     else
       {:error, reason} -> {:error, reason}
     end
