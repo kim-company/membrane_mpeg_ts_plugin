@@ -8,17 +8,17 @@ defmodule MPEG.TS.PacketTest do
   describe "MPEG TS Packet parser" do
     test "successfully parses a valid packet" do
       raw_data = Factory.pat_packet()
-      assert {:ok, %Packet{payload: %PSI{table: %{1 => 4096}}}, <<>>} = Packet.unmarshal(raw_data)
+      assert {:ok, %Packet{payload: %PSI{table: %{1 => 4096}}}} = Packet.unmarshal(raw_data)
     end
 
     test "asks for more data if packet is not complete but valid" do
       <<partial::160-binary, _rest::binary>> = Factory.pat_packet()
-      assert {:error, :not_enough_data, ^partial} = Packet.unmarshal(partial)
+      assert {:error, :not_enough_data} = Packet.unmarshal(partial)
     end
 
     test "fails when garbage is provided" do
       data = "garbagio"
-      assert {:error, :invalid_data, ^data} = Packet.unmarshal(data)
+      assert {:error, :invalid_data} = Packet.unmarshal(data)
     end
   end
 

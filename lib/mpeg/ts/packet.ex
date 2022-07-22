@@ -17,8 +17,8 @@ defmodule MPEG.TS.Packet do
 
   @type unmarshal_error_t :: :invalid_data | :not_enough_data | :invalid_packet | :unsupported_packet
 
-  @spec unmarshal(binary()) :: {:ok, t, binary()} | {:error, unmarshal_error_t, binary()}
-  def unmarshal(data = <<
+  @spec unmarshal(binary()) :: {:ok, t} | {:error, unmarshal_error_t}
+  def unmarshal(<<
            0x47::8,
            _transport_error_indicator::1,
            payload_unit_start_indicator::1,
@@ -29,7 +29,6 @@ defmodule MPEG.TS.Packet do
            _continuity_counter::4,
            # 184 = 188 - header length
     optional_fields::@ts_payload_size-binary,
-    rest::binary,
      >>) do
 
    with adaptation_field_id = parse_adaptation_field(adaptation_field_control),
@@ -37,15 +36,14 @@ defmodule MPEG.TS.Packet do
         pusi = parse_pusi(payload_unit_start_indicator),
             {:ok, data} <- parse_payload(optional_fields, adaptation_field_id, payload_id, pusi),
          {:ok, payload} <- unmarshal_payload(data) do
-     {:ok, %__MODULE__{payload: payload}, rest}
+     {:ok, %__MODULE__{payload: payload}}
     else
-      {:error, reason} -> {:error, reason, data}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  def unmarshal(data = <<0x47::8, _rest::binary>>), do: {:error, :not_enough_data, data}
-  def unmarshal(data) when byte_size(data) == @ts_packet_size, do: {:error, :invalid_packet, data}
-  def unmarshal(data) , do: {:error, :invalid_data, data}
+  def unmarshal(data = <<0x47::8, _::binary>>) when byte_size(data) < @ts_packet_size, do: {:error, :not_enough_data}
+  def unmarshal(_data), do: {:error, :invalid_data}
 
   defp parse_adaptation_field(0b01), do: :payload
   defp parse_adaptation_field(0b10), do: :adaptation
