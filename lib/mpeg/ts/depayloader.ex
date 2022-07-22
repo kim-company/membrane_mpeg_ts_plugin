@@ -18,8 +18,7 @@ defmodule MPEG.TS.Depayloader do
 
     def is_unmarshable?(buffer, unmarshaler) do
       buffer.queue
-      |> Enum.map(fn x -> x.payload end)
-      |> Enum.map(fn x -> unmarshaler.is_unmarshable?(x) end)
+      |> Enum.map(fn x -> unmarshaler.is_unmarshable?(x.payload, x.is_unit_start) end)
       |> Enum.any?()
     end
 
@@ -28,13 +27,14 @@ defmodule MPEG.TS.Depayloader do
         buffer.queue
         |> Enum.reduce({[], []}, fn x, {acc, done} ->
           acc = acc ++ [x]
+          first = List.first(acc)
 
           data =
             acc
             |> Enum.map(fn x -> x.payload end)
             |> Enum.join()
 
-          case unmarshaler.unmarshal(data) do
+          case unmarshaler.unmarshal(data, first.is_unit_start) do
             {:ok, value} -> {[], [value | done]}
             {:error, :not_enough_data} -> {acc, done}
             # NOTE: silently dropping packets!

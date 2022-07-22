@@ -22,16 +22,16 @@ defmodule MPEG.TS.PSI do
   @remaining_header_length 5
 
   @impl true
-  def is_unmarshable?(data) do
-    case unmarshal_header(data) do
+  def is_unmarshable?(data, is_start_unit) do
+    case unmarshal_header(data, is_start_unit) do
       {:ok, _} -> true
       _ -> false
     end
   end
 
   @impl true
-  def unmarshal(data) do
-    with {:ok, {header, data}} <- unmarshal_header(data) do
+  def unmarshal(data, is_start_unit) do
+    with {:ok, {header, data}} <- unmarshal_header(data, is_start_unit) do
       content_length = header.section_length - @crc_length - @remaining_header_length
 
       case data do
@@ -43,6 +43,9 @@ defmodule MPEG.TS.PSI do
       end
     end
   end
+
+  def unmarshal_header(<<0::8, data::bitstring>>, true), do: unmarshal_header(data)
+  def unmarshal_header(data, false), do: unmarshal_header(data)
 
   def unmarshal_header(<<
         table_id::8,
@@ -75,8 +78,4 @@ defmodule MPEG.TS.PSI do
   end
 
   def unmarshal_header(_), do: {:error, :invalid_header}
-
-  # defp parse_table_id(0x00), do: :pat
-  # defp parse_table_id(0x02), do: :pmt
-  # defp parse_table_id(_), do: :other
 end

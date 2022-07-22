@@ -28,18 +28,19 @@ defmodule MPEG.TS.PMT do
         }
 
   @impl true
-  def unmarshal(data) do
-    with {:ok, %PSI{table: table}} <- PSI.unmarshal(data),
-         {:ok, table} <- unmarshal_table(table) do
-      {:ok, table}
+  def is_unmarshable?(data, is_start_unit) do
+    case PSI.unmarshal_header(data, is_start_unit) do
+      {:ok, {%{table_id: 0x02}, _rest}} -> true
+      _ -> false
     end
   end
 
+
   @impl true
-  def is_unmarshable?(data) do
-    case PSI.unmarshal_header(data) do
-      {:ok, {%{table_id: 0x02}, _rest}} -> true
-      _ -> false
+  def unmarshal(data, is_start_unit) do
+    with {:ok, %PSI{table: table}} <- PSI.unmarshal(data, is_start_unit),
+         {:ok, table} <- unmarshal_table(table) do
+      {:ok, table}
     end
   end
 

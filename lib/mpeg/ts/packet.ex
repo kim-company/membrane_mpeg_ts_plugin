@@ -39,7 +39,7 @@ defmodule MPEG.TS.Packet do
          pid_class = parse_pid_class(pid),
          pusi = parse_pusi(payload_unit_start_indicator),
          scrambling = parse_scrambling_control(transport_scrambling_control),
-         {:ok, data} <- parse_payload(optional_fields, adaptation_field_id, pid_class, pusi) do
+         {:ok, data} <- parse_payload(optional_fields, adaptation_field_id, pid_class) do
       {:ok,
        %__MODULE__{
          is_unit_start: pusi,
@@ -94,11 +94,11 @@ defmodule MPEG.TS.Packet do
   defp parse_pusi(0b1), do: true
   defp parse_pusi(0b0), do: false
 
-  @spec parse_payload(binary(), adaptation_t(), pid_class_t(), boolean()) ::
+  @spec parse_payload(binary(), adaptation_t(), pid_class_t()) ::
           {:ok, bitstring()} | {:error, parse_error_t()}
-  defp parse_payload(_, :adaptation, _, _), do: {:ok, <<>>}
-  defp parse_payload(_, :reserved, _, _), do: {:error, :unsupported_packet}
-  defp parse_payload(_, :payload, :null_packet, _), do: {:ok, <<>>}
+  defp parse_payload(_, :adaptation, _), do: {:ok, <<>>}
+  defp parse_payload(_, :reserved, _), do: {:error, :unsupported_packet}
+  defp parse_payload(_, :payload, :null_packet), do: {:ok, <<>>}
 
   defp parse_payload(
          <<
@@ -107,17 +107,12 @@ defmodule MPEG.TS.Packet do
            payload::bitstring
          >>,
          :adaptation_and_payload,
-         pid,
-         pusi
+         pid
        ),
-       do: parse_payload(payload, :payload, pid, pusi)
+       do: parse_payload(payload, :payload, pid)
 
-  # TODO: support pointer != 0
-  defp parse_payload(<<0::8, payload::binary>>, :payload, pid_class, true),
-    do: parse_payload(payload, :payload, pid_class, false)
+  defp parse_payload(payload, :payload, :psi), do: {:ok, payload}
+  defp parse_payload(payload, :payload, :pat), do: {:ok, payload}
 
-  defp parse_payload(payload, :payload, :psi, false), do: {:ok, payload}
-  defp parse_payload(payload, :payload, :pat, false), do: {:ok, payload}
-
-  defp parse_payload(_, :payload, _, _), do: {:error, :unsupported_packet}
+  defp parse_payload(_, :payload, _), do: {:error, :unsupported_packet}
 end
