@@ -1,10 +1,10 @@
-defmodule MPEG.TS.PES do
+defmodule MPEG.TS.PartialPES do
   @behaviour MPEG.TS.Unmarshaler
 
   @moduledoc """
-  Packetized Elemetary Stream. PES packets are much larger in size
-  than TS packets are. This means that they have to be unmarshaled from a
-  series of payloads.
+  Partial Packetized Elemetary Stream. PES packets are much larger in size than
+  TS packets are. This means that they have to be unmarshaled from a series of
+  payloads, hence each packet here will only contain a partial PES packet.
   """
   @type t :: %__MODULE__{data: binary(), stream_id: pos_integer(), packet_length: pos_integer()}
   defstruct [:data, :stream_id, :packet_length]
@@ -30,22 +30,17 @@ defmodule MPEG.TS.PES do
         <<
           1::24,
           stream_id::8,
-          _packet_length::16,
+          packet_length::16,
           optional_fields::bitstring
         >>,
         true
       ) do
-    # NOTE: the packet_length field might be set to zero. In that case, I don't
-    # know how to assemble the PES packet back.
-    #
-    # TODO: handle the packet_length == 0 case.
-    #
-    # TODO: ask for more packets if the PES is not complete. The problem is:
-    # how do we detect that?
-
+    # Packet length is ignored as the field is also allowed to be zero in case
+    # the payload is a video elementary stream. If the PES packet length is set
+    # to zero, the PES packet can be of any length.
     case parse_optional(optional_fields, stream_id) do
       {:ok, data} ->
-        {:ok, %__MODULE__{data: data, stream_id: stream_id}}
+        {:ok, %__MODULE__{data: data, stream_id: stream_id, packet_length: packet_length}}
 
       err = {:error, _reason} ->
         err

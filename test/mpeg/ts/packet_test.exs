@@ -22,7 +22,7 @@ defmodule MPEG.TS.PacketTest do
       assert {:error, :not_enough_data} = Packet.parse(partial)
     end
 
-    test "successfully parse a valid PES packet" do
+    test "successfully parse a valid PartialPES packet" do
       raw_data = Factory.data_packet_video()
       assert byte_size(raw_data) == Packet.packet_size()
       assert {:ok, %Packet{payload: data}} = Packet.parse(raw_data)

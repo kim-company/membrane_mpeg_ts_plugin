@@ -65,8 +65,15 @@ defmodule MPEG.TS.Packet do
     for <<packet::binary-@ts_packet_size <- data>>, do: parse(packet)
   end
 
-  @spec parse_many_ok(binary()) :: [t]
-  def parse_many_ok(data) do
+  @spec parse_many!(binary()) :: [t]
+  def parse_many!(data) do
+    data
+    |> parse_many()
+    |> Enum.map(fn {:ok, x} -> x end)
+  end
+
+  @spec parse_valid(binary()) :: [t]
+  def parse_valid(data) do
     data
     |> parse_many()
     |> Enum.filter(fn
