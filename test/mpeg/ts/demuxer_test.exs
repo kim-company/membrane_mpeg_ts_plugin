@@ -46,6 +46,6 @@ defmodule MPEG.TS.DemuxerTest do
       |> Demuxer.new()
       |> Demuxer.push(packets)
 
-    assert {_state, {PartialPES, _pes}} = Demuxer.pop(state)
+    assert {_state, {{PartialPES, 256}, _pes}} = Demuxer.pop(state)
   end
 end

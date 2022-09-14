@@ -1,13 +1,14 @@
 defmodule Support.DynamicPipeline do
   @moduledoc false
   use Membrane.Pipeline
+  require Logger
 
   alias Membrane.File
 
   @impl true
   def handle_init(%{input_path: input_path} = options) do
     elements = [
-      in: %File.Source{location: input_path},
+      in: %File.Source{location: input_path, chunk_size: 188},
       demuxer: Membrane.MPEG.TS.Demuxer
     ]
 
@@ -23,9 +24,14 @@ defmodule Support.DynamicPipeline do
     {{:ok, spec: spec}, options}
   end
 
-  def handle_notification({:mpeg_ts_stream_info, streams}, _from, state) do
-    video_stream_id = Enum.find(streams, fn %{stream_type: type} -> type == :H264 end)
-    audio_stream_id = Enum.find(streams, fn %{stream_type: type} -> type == :MPEG1_AUDIO end)
+  @impl true
+  def handle_notification({:mpeg_ts_stream_info, table}, _element, _context, state) do
+    streams = table.streams
+
+    {video_stream_id, _} = Enum.find(streams, fn {_, %{stream_type: type}} -> type == :H264 end)
+
+    {audio_stream_id, _} =
+      Enum.find(streams, fn {_, %{stream_type: type}} -> type == :MPEG1_AUDIO end)
 
     elements = [
       audio_out: %File.Sink{location: state.audio_out},
@@ -33,8 +39,12 @@ defmodule Support.DynamicPipeline do
     ]
 
     links = [
-      link(:demuxer) |> via_out(Pad.ref(:output, video_stream_id)) |> to(:video_out),
-      link(:demuxer) |> via_out(Pad.ref(:output, audio_stream_id)) |> to(:audio_out)
+      link(:demuxer)
+      |> via_out(Pad.ref(:output, {:stream_id, video_stream_id}))
+      |> to(:video_out),
+      link(:demuxer)
+      |> via_out(Pad.ref(:output, {:stream_id, audio_stream_id}))
+      |> to(:audio_out)
     ]
 
     spec = %ParentSpec{

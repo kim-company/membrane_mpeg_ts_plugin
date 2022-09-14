@@ -15,6 +15,14 @@ defmodule MPEG.TS.Demuxer do
     end)
   end
 
+  def add_unmarshaler(state, x = {_unmarshaler, _stream_id}) do
+    %__MODULE__{state | unmarshalers: [x | state.unmarshalers]}
+  end
+
+  def add_unmarshaler(state, unmarshaler) do
+    add_unmarshaler(state, {unmarshaler, nil})
+  end
+
   @doc """
   Enqueues the packets it can unmarshal and hence demultiplex. Returns the new
   state and the packets that not unmarshabled with the provided list of
@@ -51,6 +59,11 @@ defmodule MPEG.TS.Demuxer do
     end
   end
 
+  @spec flush(t()) :: {t(), [{Unmarshaler.t(), Unmarshaler.result_t()}]}
+  def flush(state = %{queue: queue}) do
+    {%{state | queue: Qex.new()}, Enum.to_list(queue)}
+  end
+
   defp unmarshal_packet(state, pkt) do
     wrap_nil = fn
       nil -> {nil, nil}
@@ -64,34 +77,24 @@ defmodule MPEG.TS.Demuxer do
   end
 
   defp unmarshal_packet_with_unmarshaler({nil, _nil}, pkt) do
-    {:error, pkt, :no_unmarhalers}
+    {:error, pkt, :no_unmarshaler}
   end
 
-  defp unmarshal_packet_with_unmarshaler({unm, nil}, pkt) do
+  defp unmarshal_packet_with_unmarshaler({unm, sid}, pkt = %Packet{pid: pid})
+       when sid == nil or sid == pid do
     case unm.unmarshal(pkt.payload, pkt.is_unit_start) do
       {:error, reason} ->
         {:error, pkt, reason}
 
-      {:ok, result} ->
+      {:ok, result} when sid == nil ->
         {:ok, unm, result}
+
+      {:ok, result} ->
+        {:ok, {unm, sid}, result}
     end
   end
 
-  defp unmarshal_packet_with_unmarshaler({_unm, stream_id}, pkt = %Packet{pid: pid})
-       when stream_id != pid do
+  defp unmarshal_packet_with_unmarshaler({_unm, _stream_id}, pkt) do
     {:error, pkt, :unmatched_stream_id}
-  end
-
-  defp unmarshal_packet_with_unmarshaler({unm, _stream_id}, pkt) do
-    # when stream_id matches or it is unspecified, the behavior is the same.
-    unmarshal_packet_with_unmarshaler({unm, nil}, pkt)
-  end
-
-  defp add_unmarshaler(state, x = {_unmarshaler, _stream_id}) do
-    %__MODULE__{state | unmarshalers: [x | state.unmarshalers]}
-  end
-
-  defp add_unmarshaler(state, unmarshaler) do
-    add_unmarshaler(state, {unmarshaler, nil})
   end
 end

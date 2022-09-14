@@ -21,9 +21,10 @@ defmodule MPEG.TS.Packet do
   defstruct [:payload, :is_unit_start, :pid, :continuity_counter, :scrambling]
 
   @type parse_error_t ::
-          :invalid_data | :not_enough_data | :invalid_packet | :unsupported_packet
+          :invalid_data | :invalid_packet | :unsupported_packet
 
-  @spec parse(binary()) :: {:ok, t} | {:error, parse_error_t}
+  @spec parse(binary()) ::
+          {:ok, t} | {:error, parse_error_t} | {:error, :not_enough_data, binary()}
   def parse(<<
         0x47::8,
         _transport_error_indicator::1,
@@ -54,7 +55,7 @@ defmodule MPEG.TS.Packet do
   end
 
   def parse(data = <<0x47::8, _::binary>>) when byte_size(data) < @ts_packet_size,
-    do: {:error, :not_enough_data}
+    do: {:error, :not_enough_data, data}
 
   def parse(_data), do: {:error, :invalid_data}
 
