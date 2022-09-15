@@ -25,6 +25,7 @@ defmodule MPEG.TS.Demuxer do
 
   def push_buffer(state, buffer) do
     {ok, bytes_to_buffer} = parse_buffer(state.buffered_bytes <> buffer)
+
     state = push_packets(%__MODULE__{state | buffered_bytes: <<>>}, ok)
     %__MODULE__{state | buffered_bytes: bytes_to_buffer}
   end

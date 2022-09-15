@@ -26,7 +26,10 @@ defmodule Support.DynamicPipeline do
 
   @impl true
   def handle_notification({:mpeg_ts_stream_info, table}, _element, _context, state) do
-    streams = table.streams
+    streams =
+      table
+      |> Enum.map(fn x -> x.streams end)
+      |> Enum.reduce(%{}, fn x, acc -> Map.merge(x, acc) end)
 
     {video_stream_id, _} = Enum.find(streams, fn {_, %{stream_type: type}} -> type == :H264 end)
 

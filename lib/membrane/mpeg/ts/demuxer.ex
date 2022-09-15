@@ -65,7 +65,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   @impl true
   def handle_demand(pad, size, :buffers, _ctx, state) do
-    pending = Map.update(state.pending_demand, pad, 0, fn old -> old + size end)
+    pending = Map.update(state.pending_demand, pad, size, fn old -> old + size end)
     state = %{state | pending_demand: pending}
 
     {fulfill_actions, state} = fulfill_pending_demand(state)
@@ -79,20 +79,21 @@ defmodule Membrane.MPEG.TS.Demuxer do
     demuxer = TS.Demuxer.push_buffer(state.demuxer, buffer.payload)
     state = %{state | demuxer: demuxer}
 
-    {notifications, state} =
-      if state.state == :waiting_pmt && TS.Demuxer.has_pmt?(demuxer) do
-        actions = [
-          {:notify, {:mpeg_ts_stream_info, TS.Demuxer.take_pmts(demuxer)}}
-        ]
+    {extra_actions, state} =
+      cond do
+        state.state == :waiting_pmt && TS.Demuxer.has_pmt?(demuxer) ->
+          {[{:notify, {:mpeg_ts_stream_info, TS.Demuxer.take_pmts(demuxer)}}],
+           %{state | state: :online}}
 
-        state = %{state | state: :online}
-        {actions, state}
-      else
-        {[], state}
+        state.state == :waiting_pmt ->
+          {[{:demand, Pad.ref(:input)}], state}
+
+        true ->
+          {[], state}
       end
 
     {fulfill_actions, state} = fulfill_pending_demand(state)
-    {{:ok, notifications ++ fulfill_actions}, state}
+    {{:ok, extra_actions ++ fulfill_actions}, state}
   end
 
   defp fulfill_pending_demand(state) do
@@ -100,7 +101,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       state.pending_demand
       |> Enum.map_reduce(state.demuxer, fn {pad, size}, demuxer ->
         {Membrane.Pad, _, {:stream_id, sid}} = pad
-        {demuxer, packets} = TS.Demuxer.take_from_stream(demuxer, sid, size)
+        {packets, demuxer} = TS.Demuxer.take_from_stream(demuxer, sid, size)
         missing = size - length(packets)
         {{pad, packets, missing}, demuxer}
       end)
@@ -110,7 +111,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       |> Enum.flat_map(fn {pad, packets, _missing} ->
         packets
         |> Enum.map(fn {unm = MPEG.TS.PartialPES, packet} ->
-          case unm.unmarshal(packet) do
+          case unm.unmarshal(packet.payload, packet.is_unit_start) do
             {:ok, pes} ->
               pes
 
@@ -121,6 +122,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
         end)
         |> Enum.map(fn pes -> {:buffer, {pad, %Membrane.Buffer{payload: pes.data}}} end)
       end)
+      |> IO.inspect(label: "sending")
 
     pending_demand =
       pad_with_packets
@@ -133,7 +135,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   defp forward_demand(state) do
     actions =
       state.pending_demand
-      |> Enum.map(fn {pad, size} -> {:demand, {pad, size}} end)
+      |> Enum.map(fn {_pad, size} -> {:demand, {Pad.ref(:input), size}} end)
 
     {actions, state}
   end
