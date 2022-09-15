@@ -19,7 +19,7 @@ defmodule MPEG.TS.PacketTest do
 
     test "asks for more data if packet is not complete but valid" do
       <<partial::160-binary, _rest::binary>> = Factory.pat_packet()
-      assert {:error, :not_enough_data} = Packet.parse(partial)
+      assert {:error, :not_enough_data, _data} = Packet.parse(partial)
     end
 
     test "successfully parse a valid PartialPES packet" do

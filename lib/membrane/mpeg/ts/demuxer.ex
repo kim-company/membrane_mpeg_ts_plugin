@@ -12,14 +12,16 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   Configuration sent by element to pipeline has following shape
   ```
-  %MPEG.TS.PMT{
-    pcr_pid: 256,
-    program_info: [],
-    streams: %{
-      256 => %{stream_type: :H264, stream_type_id: 27},
-      257 => %{stream_type: :MPEG1_AUDIO, stream_type_id: 3}
+  [
+    %MPEG.TS.PMT{
+      pcr_pid: 256,
+      program_info: [],
+      streams: %{
+        256 => %{stream_type: :H264, stream_type_id: 27},
+        257 => %{stream_type: :MPEG1_AUDIO, stream_type_id: 3}
+      }
     }
-  }
+  ]
 
   ```
   """
@@ -34,9 +36,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   @initial_state %{
     state: :waiting_pmt,
-    demuxer: TS.Demuxer.new(),
-    pad_lut: %{},
-    bytes_buffer: <<>>,
+    demuxer: TS.Demuxer.new([]),
     pending_demand: %{}
   }
 
@@ -76,14 +76,13 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   @impl true
   def handle_process(:input, buffer, _ctx, state) do
-    {packets, to_buffer} = parse_buffer(state.bytes_buffer <> buffer)
-    demuxer = TS.Demuxer.push(state.demuxer, packets)
-    state = %{state | bytes_buffer: to_buffer, demuxer: demuxer}
+    demuxer = TS.Demuxer.push_buffer(state.demuxer, buffer.payload)
+    state = %{state | demuxer: demuxer}
 
     {notifications, state} =
       if state.state == :waiting_pmt && TS.Demuxer.has_pmt?(demuxer) do
         actions = [
-          {:notify, {:mpeg_ts_stream_info, TS.Demuxer.get_pmt!(demuxer)}}
+          {:notify, {:mpeg_ts_stream_info, TS.Demuxer.take_pmts(demuxer)}}
         ]
 
         state = %{state | state: :online}
@@ -96,43 +95,12 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {{:ok, notifications ++ fulfill_actions}, state}
   end
 
-  defp parse_buffer(buffer) do
-    {ok, err} =
-      buffer
-      |> TS.Packet.parse_many()
-      |> Enum.split_with(fn tuple -> elem(tuple, 0) == :ok end)
-
-    # fail fast in case a critical error is encountered. If data becomes
-    # mis-aligned this module should be responsible for fixing it.
-    critical_err =
-      Enum.find(err, fn tuple ->
-        elem(tuple, 0) == :error && elem(tuple, 1) != :not_enough_data
-      end)
-
-    if critical_err != nil do
-      raise ArgumentError, "MPEG-TS unrecoverable parse error: #{inspect(elem(critical_err, 1))}"
-    end
-
-    to_buffer =
-      err
-      |> Enum.filter(fn
-        {:error, :not_enough_data, _} -> true
-        _ -> false
-      end)
-      |> Enum.map(fn {_, _, data} -> data end)
-      |> Enum.reduce(<<>>, fn x, acc -> acc <> x end)
-
-    ok = Enum.map(ok, fn {:ok, x} -> x end)
-
-    {ok, to_buffer}
-  end
-
   defp fulfill_pending_demand(state) do
     {pad_with_packets, demuxer} =
       state.pending_demand
       |> Enum.map_reduce(state.demuxer, fn {pad, size}, demuxer ->
         {Membrane.Pad, _, {:stream_id, sid}} = pad
-        {demuxer, packets} = TS.Demuxer.packets_from_stream(demuxer, sid, size)
+        {demuxer, packets} = TS.Demuxer.take_from_stream(demuxer, sid, size)
         missing = size - length(packets)
         {{pad, packets, missing}, demuxer}
       end)

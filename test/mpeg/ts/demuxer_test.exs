@@ -2,14 +2,15 @@ defmodule MPEG.TS.DemuxerTest do
   use ExUnit.Case
 
   alias MPEG.TS.Demuxer
-  alias MPEG.TS.{PartialPES, PMT}
+  alias MPEG.TS.PartialPES
   alias MPEG.TS.Packet
 
   @all_packets_path "./test/fixtures/all_packets.ts"
 
-  test "does not break if empty" do
-    state = Demuxer.new([PMT])
-    assert {_, :empty} = Demuxer.pop(state)
+  test "empty behaviour" do
+    state = Demuxer.new()
+    assert {[], state} = Demuxer.take_from_stream(state, 2)
+    assert {[], _state} = Demuxer.take_from_stream(state, 2, 1_000)
   end
 
   test "finds PMT table" do
@@ -18,13 +19,13 @@ defmodule MPEG.TS.DemuxerTest do
       |> File.read!()
       |> Packet.parse_valid()
 
-    {state, _rejected} =
-      [PMT]
-      |> Demuxer.new()
-      |> Demuxer.push(packets)
+    state =
+      Demuxer.new()
+      |> Demuxer.push_packets(packets)
 
-    assert {_state,
-            {PMT,
+    assert Demuxer.has_pmt?(state)
+
+    assert [
              %MPEG.TS.PMT{
                pcr_pid: 256,
                program_info: [],
@@ -32,7 +33,8 @@ defmodule MPEG.TS.DemuxerTest do
                  256 => %{stream_type: :H264, stream_type_id: 27},
                  257 => %{stream_type: :MPEG1_AUDIO, stream_type_id: 3}
                }
-             }}} = Demuxer.pop(state)
+             }
+           ] == Demuxer.take_pmts(state)
   end
 
   test "demuxes PES stream" do
@@ -41,11 +43,31 @@ defmodule MPEG.TS.DemuxerTest do
       |> File.read!()
       |> Packet.parse_valid()
 
-    {state, _rejected} =
-      [{PartialPES, 256}]
-      |> Demuxer.new()
-      |> Demuxer.push(packets)
+    state =
+      Demuxer.new()
+      |> Demuxer.push_packets(packets)
 
-    assert {_state, {{PartialPES, 256}, _pes}} = Demuxer.pop(state)
+    assert {[{unm = PartialPES, packet}], _state} = Demuxer.take_from_stream(state, 256, 1)
+    assert {:ok, _pes} = unm.unmarshal(packet.payload, packet.is_unit_start)
+  end
+
+  test "accepts raw bytes" do
+    bytes =
+      @all_packets_path
+      |> File.read!()
+
+    packets =
+      bytes
+      |> Packet.parse_valid()
+
+    state_from_packets =
+      Demuxer.new()
+      |> Demuxer.push_packets(packets)
+
+    state_from_bytes =
+      Demuxer.new()
+      |> Demuxer.push_buffer(bytes)
+
+    assert state_from_bytes == state_from_packets
   end
 end
