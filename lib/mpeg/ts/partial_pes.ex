@@ -10,7 +10,7 @@ defmodule MPEG.TS.PartialPES do
   defstruct [:data, :stream_id, :packet_length]
 
   @impl true
-  def is_unmarshable?(_data, false), do: false
+  def is_unmarshable?(_data, false), do: true
 
   def is_unmarshable?(
         <<
@@ -49,7 +49,7 @@ defmodule MPEG.TS.PartialPES do
 
   def unmarshal(_, true), do: {:error, :invalid_packet}
 
-  def unmarshal(data, false), do: {:ok, data}
+  def unmarshal(data, false), do: {:ok, %__MODULE__{data: data}}
 
   defp parse_optional(<<0b10::2, optional::bitstring>>, stream_id) do
     stream_ids_with_no_optional_fields = [

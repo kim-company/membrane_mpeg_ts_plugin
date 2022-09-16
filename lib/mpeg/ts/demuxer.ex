@@ -113,6 +113,13 @@ defmodule MPEG.TS.Demuxer do
     end)
   end
 
+  def stream_size(state, stream_id) do
+    case Map.get(state.streams, stream_id) do
+      nil -> 0
+      %RingBuffer{size: size} -> size
+    end
+  end
+
   defp parse_buffer(buffer) do
     {ok, err} =
       buffer

@@ -25,8 +25,12 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     # starting \o/
     Pipeline.play(pipeline)
 
+    assert_start_of_stream(pipeline, :video_out)
+    assert_start_of_stream(pipeline, :audio_out)
+
     assert_end_of_stream(pipeline, :video_out)
     assert_end_of_stream(pipeline, :audio_out)
+
     assert_files_equal(@reference_audio, audio_out)
     assert_files_equal(@reference_video, video_out)
   end

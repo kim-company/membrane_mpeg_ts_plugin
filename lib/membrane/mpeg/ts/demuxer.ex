@@ -37,7 +37,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
   @initial_state %{
     state: :waiting_pmt,
     demuxer: TS.Demuxer.new([]),
-    pending_demand: %{}
+    pending_demand: %{},
+    closed: false
   }
 
   @impl true
@@ -54,7 +55,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_prepared_to_stopped(_ctx, _state), do: {:ok, @initial_state}
+  def handle_prepared_to_stopped(_ctx, _state) do
+    {:ok, @initial_state}
+  end
 
   @impl true
   def handle_prepared_to_playing(_ctx, state) do
@@ -96,10 +99,14 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {{:ok, extra_actions ++ fulfill_actions}, state}
   end
 
+  @impl true
+  def handle_end_of_stream(:input, _ctx, state) do
+    {:ok, %{state | closed: true}}
+  end
+
   defp fulfill_pending_demand(state) do
     {pad_with_packets, demuxer} =
-      state.pending_demand
-      |> Enum.map_reduce(state.demuxer, fn {pad, size}, demuxer ->
+      Enum.map_reduce(state.pending_demand, state.demuxer, fn {pad, size}, demuxer ->
         {Membrane.Pad, _, {:stream_id, sid}} = pad
         {packets, demuxer} = TS.Demuxer.take_from_stream(demuxer, sid, size)
         missing = size - length(packets)
@@ -107,22 +114,29 @@ defmodule Membrane.MPEG.TS.Demuxer do
       end)
 
     actions =
-      pad_with_packets
-      |> Enum.flat_map(fn {pad, packets, _missing} ->
-        packets
-        |> Enum.map(fn {unm = MPEG.TS.PartialPES, packet} ->
-          case unm.unmarshal(packet.payload, packet.is_unit_start) do
-            {:ok, pes} ->
-              pes
+      Enum.flat_map(pad_with_packets, fn {pad, packets, _missing} ->
+        {Membrane.Pad, _, {:stream_id, sid}} = pad
 
-            {:error, reason} ->
-              raise ArgumentError,
-                    "MPEG-TS could not parse Partial PES packet: #{inspect(reason)}"
-          end
-        end)
-        |> Enum.map(fn pes -> {:buffer, {pad, %Membrane.Buffer{payload: pes.data}}} end)
+        buffer_actions =
+          packets
+          |> Enum.map(fn {unm = MPEG.TS.PartialPES, packet} ->
+            case unm.unmarshal(packet.payload, packet.is_unit_start) do
+              {:ok, pes} ->
+                pes
+
+              {:error, reason} ->
+                raise ArgumentError,
+                      "MPEG-TS could not parse Partial PES packet: #{inspect(reason)}"
+            end
+          end)
+          |> Enum.map(fn pes -> {:buffer, {pad, %Membrane.Buffer{payload: pes.data}}} end)
+
+        if TS.Demuxer.stream_size(demuxer, sid) == 0 and state.closed do
+          buffer_actions ++ [{:end_of_stream, pad}]
+        else
+          buffer_actions
+        end
       end)
-      |> IO.inspect(label: "sending")
 
     pending_demand =
       pad_with_packets
