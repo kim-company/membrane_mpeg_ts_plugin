@@ -1,8 +1,7 @@
 defmodule Support.DynamicPipeline do
   @moduledoc false
-  use Membrane.Pipeline
-  require Logger
 
+  use Membrane.Pipeline
   alias Membrane.File
 
   @impl true
@@ -25,29 +24,23 @@ defmodule Support.DynamicPipeline do
   end
 
   @impl true
-  def handle_notification({:mpeg_ts_stream_info, table}, _element, _context, state) do
-    streams =
-      table
-      |> Enum.map(fn x -> x.streams end)
-      |> Enum.reduce(%{}, fn x, acc -> Map.merge(x, acc) end)
-
-    {video_stream_id, _} = Enum.find(streams, fn {_, %{stream_type: type}} -> type == :H264 end)
-
-    {audio_stream_id, _} =
-      Enum.find(streams, fn {_, %{stream_type: type}} -> type == :MPEG1_AUDIO end)
+  def handle_notification(
+        {:mpeg_ts_pmt_stream, %{stream_id: sid, stream_type: type}},
+        _element,
+        _context,
+        state
+      )
+      when type in [:H264, :MPEG1_AUDIO] do
+    link_to = link_from_stream_type(type)
 
     elements = [
-      audio_out: %File.Sink{location: state.audio_out},
-      video_out: %File.Sink{location: state.video_out}
+      {link_to, %File.Sink{location: Map.get(state, link_to)}}
     ]
 
     links = [
       link(:demuxer)
-      |> via_out(Pad.ref(:output, {:stream_id, video_stream_id}))
-      |> to(:video_out),
-      link(:demuxer)
-      |> via_out(Pad.ref(:output, {:stream_id, audio_stream_id}))
-      |> to(:audio_out)
+      |> via_out(Pad.ref(:output, {:stream_id, sid}))
+      |> to(link_to)
     ]
 
     spec = %ParentSpec{
@@ -58,5 +51,10 @@ defmodule Support.DynamicPipeline do
     {{:ok, spec: spec}, state}
   end
 
-  def handle_notification(_notification, _from, state), do: {:ok, state}
+  def handle_notification(_notification, _element, _context, state) do
+    {:ok, state}
+  end
+
+  defp link_from_stream_type(:H264), do: :video_out
+  defp link_from_stream_type(:MPEG1_AUDIO), do: :audio_out
 end

@@ -21,6 +21,7 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     ]
 
     {:ok, pipeline} = Pipeline.start_link(options)
+
     # TODO: this function is deprecated but if not called the pipeline is not
     # starting \o/
     Pipeline.play(pipeline)
