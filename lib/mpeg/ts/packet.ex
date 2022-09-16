@@ -122,5 +122,8 @@ defmodule MPEG.TS.Packet do
   defp parse_payload(payload, :payload, :psi), do: {:ok, payload}
   defp parse_payload(payload, :payload, :pat), do: {:ok, payload}
 
-  defp parse_payload(_, :payload, _), do: {:error, :unsupported_packet}
+  # TODO: I got packets with adaptation_and_payload that do not conform to the
+  # format above and hence create errors.
+  # defp parse_payload(_, :payload, _), do: {:error, :unsupported_packet}
+  defp parse_payload(_, _, _), do: {:error, :unsupported_packet}
 end

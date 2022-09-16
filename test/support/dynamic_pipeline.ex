@@ -30,7 +30,7 @@ defmodule Support.DynamicPipeline do
         _context,
         state
       )
-      when type in [:H264, :MPEG1_AUDIO] do
+      when type in [:H264, :MPEG1_AUDIO, :AAC] do
     link_to = link_from_stream_type(type)
 
     elements = [
@@ -57,4 +57,5 @@ defmodule Support.DynamicPipeline do
 
   defp link_from_stream_type(:H264), do: :video_out
   defp link_from_stream_type(:MPEG1_AUDIO), do: :audio_out
+  defp link_from_stream_type(:AAC), do: :audio_out
 end

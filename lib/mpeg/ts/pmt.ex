@@ -111,5 +111,5 @@ defmodule MPEG.TS.PMT do
   defp parse_stream_assigment(0x1B), do: :H264
   defp parse_stream_assigment(0x1F), do: :MPEG4_SVC
   defp parse_stream_assigment(0x20), do: :MPEG4_MVC
-  defp parse_stream_assigment(0x24), do: :H265
+  defp parse_stream_assigment(_), do: :undefined
 end

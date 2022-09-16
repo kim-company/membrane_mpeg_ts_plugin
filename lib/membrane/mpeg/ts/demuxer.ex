@@ -6,26 +6,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
   Association Table](https://en.wikipedia.org/wiki/MPEG_transport_stream#PAT)
   and [Program Mapping
   Table](https://en.wikipedia.org/wiki/MPEG_transport_stream#PMT).
-
-  TODO: the following information is outdated.
-
-  Upon succesfful parsing of those tables it will send a message to the
-  pipeline in format `{:mpeg_ts_stream_info, configuration}`, where
-  configuration contains data read from tables.
-
-  Configuration sent by element to pipeline has following shape
-  ```
-  [
-    %MPEG.TS.PMT{
-      pcr_pid: 256,
-      program_info: [],
-      streams: %{
-        256 => %{stream_type: :H264, stream_type_id: 27},
-        257 => %{stream_type: :MPEG1_AUDIO, stream_type_id: 3}
-      }
-    }
-  ]
-
   ```
   """
   use Membrane.Filter
@@ -118,11 +98,21 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   defp fulfill_pending_demand(state) do
     {actions, state} =
-      Enum.map_reduce(state.pending_demand, state, fn {pad, size}, state ->
-        fulfill_actions_on_pad(state, pad, size)
+      Enum.map_reduce(state.pending_demand, state, fn {pad, _size}, state ->
+        # NOTE: size is set to 1 to take advantage of the :redemand action.
+        fulfill_actions_on_pad(state, pad, 1)
       end)
 
-    {List.flatten(actions), state}
+    actions =
+      actions
+      |> List.flatten()
+      |> Enum.sort(fn
+        {:redemand, _}, {:redemand, _} -> true
+        {:redemand, _}, {_, _} -> false
+        _, _ -> true
+      end)
+
+    {actions, state}
   end
 
   defp fulfill_actions_on_pad(state, pad = {Membrane.Pad, _, {:stream_id, sid}}, size) do
@@ -144,16 +134,24 @@ defmodule Membrane.MPEG.TS.Demuxer do
       end)
       |> Enum.map(fn pes -> {:buffer, {pad, %Membrane.Buffer{payload: pes.data}}} end)
 
+    stream_size = TS.Demuxer.stream_size(demuxer, sid)
+
     {actions, state} =
-      if TS.Demuxer.stream_size(demuxer, sid) == 0 and state.closed do
-        # If the pad is not removed from the pending demand, we'll always try
-        # fulfilling it again, even though end_of_stream has already been
-        # reached.
-        pending_demand = Map.delete(state.pending_demand, pad)
-        {buffer_actions ++ [{:end_of_stream, pad}], %{state | pending_demand: pending_demand}}
-      else
-        pending_demand = Map.put(state.pending_demand, pad, missing)
-        {buffer_actions, %{state | pending_demand: pending_demand}}
+      cond do
+        stream_size == 0 and state.closed ->
+          # If the pad is not removed from the pending demand, we'll always try
+          # fulfilling it again, even though end_of_stream has already been
+          # reached.
+          pending_demand = Map.delete(state.pending_demand, pad)
+          {buffer_actions ++ [{:end_of_stream, pad}], %{state | pending_demand: pending_demand}}
+
+        length(buffer_actions) > 0 ->
+          pending_demand = Map.put(state.pending_demand, pad, missing)
+          {buffer_actions ++ [{:redemand, pad}], %{state | pending_demand: pending_demand}}
+
+        true ->
+          pending_demand = Map.put(state.pending_demand, pad, missing)
+          {buffer_actions, %{state | pending_demand: pending_demand}}
       end
 
     {actions, %{state | demuxer: demuxer}}

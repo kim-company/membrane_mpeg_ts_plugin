@@ -3,18 +3,26 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
   import Membrane.Testing.Assertions
   alias Membrane.Testing.Pipeline
 
-  @input_path "./test/fixtures/all_packets.ts"
-  @reference_audio "./test/fixtures/reference_audio.ts"
-  @reference_video "./test/fixtures/reference_video.ts"
+  test "demuxes bundestages example" do
+    run_pipeline("reference-0")
+  end
 
-  test "extracts audio and video using a dynamically linked pipeline" do
-    video_out = Path.join([System.tmp_dir!(), "membrane_video.ts"])
-    audio_out = Path.join([System.tmp_dir!(), "membrane_audio.ts"])
+  test "demuxes reference" do
+    run_pipeline("reference-1")
+  end
+
+  defp run_pipeline(data_dir) do
+    [input, audio, video] =
+      ["all.ts", "audio.ts", "video.ts"]
+      |> Enum.map(&Path.join(["test", "fixtures", data_dir, &1]))
+
+    video_out = Path.join([System.tmp_dir!(), "video.ts"])
+    audio_out = Path.join([System.tmp_dir!(), "audio.ts"])
 
     options = [
       module: Support.DynamicPipeline,
       custom_args: %{
-        input_path: @input_path,
+        input_path: input,
         audio_out: audio_out,
         video_out: video_out
       }
@@ -29,11 +37,11 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     assert_start_of_stream(pipeline, :video_out)
     assert_start_of_stream(pipeline, :audio_out)
 
-    assert_end_of_stream(pipeline, :video_out)
-    assert_end_of_stream(pipeline, :audio_out)
+    assert_end_of_stream(pipeline, :video_out, :input, 10_000)
+    assert_end_of_stream(pipeline, :audio_out, :input, 10_000)
 
-    assert_files_equal(@reference_audio, audio_out)
-    assert_files_equal(@reference_video, video_out)
+    assert_files_equal(audio, audio_out)
+    assert_files_equal(video, video_out)
   end
 
   defp assert_files_equal(file_a, file_b) do

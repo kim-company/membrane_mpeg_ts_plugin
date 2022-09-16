@@ -5,7 +5,7 @@ defmodule MPEG.TS.DemuxerTest do
   alias MPEG.TS.PartialPES
   alias MPEG.TS.Packet
 
-  @all_packets_path "./test/fixtures/all_packets.ts"
+  @all_packets_path "./test/fixtures/reference-1/all.ts"
 
   test "empty behaviour" do
     state = Demuxer.new()
