@@ -28,12 +28,14 @@ defmodule MPEG.TS.PMT do
         }
 
   @impl true
-  def is_unmarshable?(data, is_start_unit) do
+  def is_unmarshable?(data, is_start_unit = true) do
     case PSI.unmarshal_header(data, is_start_unit) do
       {:ok, {%{table_id: 0x02}, _rest}} -> true
       _ -> false
     end
   end
+
+  def is_unmarshable?(_data, false), do: false
 
   @impl true
   def unmarshal(data, is_start_unit) do
@@ -63,8 +65,13 @@ defmodule MPEG.TS.PMT do
     end
   end
 
-  defp parse_program_info(descriptors, data)
   defp parse_program_info(0, date), do: {:ok, {[], date}}
+
+  defp parse_program_info(program_info_length, data) do
+    # TODO: implement parsing
+    <<_program_descriptors::binary-size(program_info_length), rest::binary>> = data
+    {:ok, {[], rest}}
+  end
 
   defp parse_streams(data, acc \\ %{})
   defp parse_streams(<<>>, acc), do: {:ok, acc}
