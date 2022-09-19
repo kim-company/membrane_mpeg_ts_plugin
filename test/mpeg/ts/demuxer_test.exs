@@ -5,12 +5,12 @@ defmodule MPEG.TS.DemuxerTest do
   alias MPEG.TS.PartialPES
   alias MPEG.TS.Packet
 
-  @all_packets_path "./test/fixtures/reference-1/all.ts"
+  @all_packets_path "./test/fixtures/reference/all.ts"
 
   test "empty behaviour" do
     state = Demuxer.new()
-    assert {[], state} = Demuxer.take_from_stream(state, 2)
-    assert {[], _state} = Demuxer.take_from_stream(state, 2, 1_000)
+    assert {[], state} = Demuxer.take_raw(state, 2)
+    assert {[], _state} = Demuxer.take_raw(state, 2, 1_000)
   end
 
   test "finds PMT table" do
@@ -23,18 +23,14 @@ defmodule MPEG.TS.DemuxerTest do
       Demuxer.new()
       |> Demuxer.push_packets(packets)
 
-    assert Demuxer.has_pmt?(state)
-
-    assert [
-             %MPEG.TS.PMT{
-               pcr_pid: 256,
-               program_info: [],
-               streams: %{
-                 256 => %{stream_type: :H264, stream_type_id: 27},
-                 257 => %{stream_type: :MPEG1_AUDIO, stream_type_id: 3}
-               }
+    assert %MPEG.TS.PMT{
+             pcr_pid: 256,
+             program_info: [],
+             streams: %{
+               256 => %{stream_type: :H264, stream_type_id: 27},
+               257 => %{stream_type: :MPEG1_AUDIO, stream_type_id: 3}
              }
-           ] == Demuxer.take_pmts(state)
+           } == Demuxer.get_pmt(state)
   end
 
   test "demuxes PES stream" do
@@ -47,7 +43,7 @@ defmodule MPEG.TS.DemuxerTest do
       Demuxer.new()
       |> Demuxer.push_packets(packets)
 
-    assert {[{unm = PartialPES, packet}], _state} = Demuxer.take_from_stream(state, 256, 1)
+    assert {[{unm = PartialPES, packet}], _state} = Demuxer.take_raw(state, 256, 1)
     assert {:ok, _pes} = unm.unmarshal(packet.payload, packet.is_unit_start)
   end
 

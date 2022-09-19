@@ -24,18 +24,20 @@ defmodule MPEG.TS.Packet do
           :invalid_data | :invalid_packet | :unsupported_packet
 
   @spec parse(binary()) ::
-          {:ok, t} | {:error, parse_error_t} | {:error, :not_enough_data, binary()}
-  def parse(<<
-        0x47::8,
-        _transport_error_indicator::1,
-        payload_unit_start_indicator::1,
-        _transport_priority::1,
-        pid::13,
-        transport_scrambling_control::2,
-        adaptation_field_control::2,
-        continuity_counter::4,
-        optional_fields::@ts_payload_size-binary
-      >>) do
+          {:ok, t} | {:error, parse_error_t, binary()}
+  def parse(
+        data = <<
+          0x47::8,
+          _transport_error_indicator::1,
+          payload_unit_start_indicator::1,
+          _transport_priority::1,
+          pid::13,
+          transport_scrambling_control::2,
+          adaptation_field_control::2,
+          continuity_counter::4,
+          optional_fields::@ts_payload_size-binary
+        >>
+      ) do
     with adaptation_field_id = parse_adaptation_field(adaptation_field_control),
          pid_class = parse_pid_class(pid),
          pusi = parse_pusi(payload_unit_start_indicator),
@@ -50,18 +52,18 @@ defmodule MPEG.TS.Packet do
          continuity_counter: continuity_counter
        }}
     else
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:error, reason, data}
     end
   end
 
   def parse(data = <<0x47::8, _::binary>>) when byte_size(data) < @ts_packet_size,
     do: {:error, :not_enough_data, data}
 
-  def parse(_data), do: {:error, :invalid_data}
+  def parse(data), do: {:error, :invalid_data, data}
 
   def packet_size(), do: @ts_packet_size
 
-  @spec parse_many(binary()) :: [{:error, parse_error_t()} | {:ok, t}]
+  @spec parse_many(binary()) :: [{:error, parse_error_t(), binary()} | {:ok, t}]
   def parse_many(data) do
     for <<packet::binary-@ts_packet_size <- data>>, do: parse(packet)
   end
@@ -79,7 +81,7 @@ defmodule MPEG.TS.Packet do
     |> parse_many()
     |> Enum.filter(fn
       {:ok, _} -> true
-      {:error, _} -> false
+      {:error, _, _} -> false
     end)
     |> Enum.map(fn {:ok, x} -> x end)
   end
@@ -124,6 +126,5 @@ defmodule MPEG.TS.Packet do
 
   # TODO: I got packets with adaptation_and_payload that do not conform to the
   # format above and hence create errors.
-  # defp parse_payload(_, :payload, _), do: {:error, :unsupported_packet}
   defp parse_payload(_, _, _), do: {:error, :unsupported_packet}
 end

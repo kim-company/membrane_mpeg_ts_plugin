@@ -25,8 +25,6 @@ defmodule Membrane.MPEG.TS.MixProject do
       {:qex, "~> 0.5"},
       {:membrane_core, "~> 0.10.0"},
       {:membrane_file_plugin, "~> 0.12.0", only: :test}
-      # {:dep_from_hexpm, "~> 0.3.0"},
-      # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
     ]
   end
 

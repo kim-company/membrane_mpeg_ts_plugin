@@ -20,28 +20,38 @@ defmodule Support.DynamicPipeline do
       links: links
     }
 
-    {{:ok, spec: spec}, options}
+    {{:ok, spec: spec, playback: :playing}, options}
   end
 
   @impl true
   def handle_notification(
-        {:mpeg_ts_pmt_stream, %{stream_id: sid, stream_type: type}},
+        {:mpeg_ts_pmt, %MPEG.TS.PMT{streams: streams}},
         _element,
         _context,
         state
-      )
-      when type in [:H264, :MPEG1_AUDIO, :AAC] do
-    link_to = link_from_stream_type(type)
+      ) do
+    streams =
+      streams
+      |> Enum.filter(fn {_, %{stream_type: type}} ->
+        Enum.member?([:H264, :MPEG1_AUDIO, :AAC], type)
+      end)
 
-    elements = [
-      {link_to, %File.Sink{location: Map.get(state, link_to)}}
-    ]
+    elements =
+      streams
+      |> Enum.map(fn {_, %{stream_type: type}} ->
+        link_to = link_from_stream_type(type)
+        {link_to, %File.Sink{location: Map.get(state, link_to)}}
+      end)
 
-    links = [
-      link(:demuxer)
-      |> via_out(Pad.ref(:output, {:stream_id, sid}))
-      |> to(link_to)
-    ]
+    links =
+      streams
+      |> Enum.map(fn {sid, %{stream_type: type}} ->
+        link_to = link_from_stream_type(type)
+
+        link(:demuxer)
+        |> via_out(Pad.ref(:output, {:stream_id, sid}))
+        |> to(link_to)
+      end)
 
     spec = %ParentSpec{
       children: elements,

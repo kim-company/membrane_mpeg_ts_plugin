@@ -17,16 +17,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   @type state_t :: :waiting_pmt | :online
 
-  @initial_state %{
-    state: :waiting_pmt,
-    demuxer: TS.Demuxer.new([]),
-    pending_demand: %{},
-    closed: false
-  }
-
   @impl true
   def handle_init(_) do
-    {:ok, @initial_state}
+    {:ok, new_state()}
   end
 
   @impl true
@@ -38,8 +31,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_prepared_to_stopped(_ctx, _state) do
-    {:ok, @initial_state}
+  def handle_prepared_to_stopped(_ctx, %{demuxer_agent: pid}) do
+    Agent.stop(pid, :normal)
+    {:ok, new_state()}
   end
 
   @impl true
@@ -54,41 +48,16 @@ defmodule Membrane.MPEG.TS.Demuxer do
     pending = Map.update(state.pending_demand, pad, size, fn old -> old + size end)
     state = %{state | pending_demand: pending}
 
-    {fulfill_actions, state} = fulfill_pending_demand(state)
-    {refresh_actions, state} = forward_demand(state)
-
-    {{:ok, fulfill_actions ++ refresh_actions}, state}
+    maybe_fulfill_demand(state)
   end
 
   @impl true
-  def handle_process(:input, buffer, _ctx, state) do
-    demuxer = TS.Demuxer.push_buffer(state.demuxer, buffer.payload)
-    state = %{state | demuxer: demuxer}
+  def handle_process(:input, buffer, _ctx, state = %{demuxer_agent: pid}) do
+    Agent.update(pid, fn demuxer ->
+      TS.Demuxer.push_buffer(demuxer, buffer.payload)
+    end)
 
-    {extra_actions, state} =
-      cond do
-        state.state == :waiting_pmt && TS.Demuxer.has_pmt?(demuxer) ->
-          actions =
-            demuxer
-            |> TS.Demuxer.take_pmts()
-            |> Enum.flat_map(fn %TS.PMT{streams: streams} ->
-              Enum.map(streams, fn {id, %{stream_type: type}} ->
-                %{stream_id: id, stream_type: type}
-              end)
-            end)
-            |> Enum.map(fn x -> {:notify, {:mpeg_ts_pmt_stream, x}} end)
-
-          {actions, %{state | state: :online}}
-
-        state.state == :waiting_pmt ->
-          {[{:demand, Pad.ref(:input)}], state}
-
-        true ->
-          {[], state}
-      end
-
-    {fulfill_actions, state} = fulfill_pending_demand(state)
-    {{:ok, extra_actions ++ fulfill_actions}, state}
+    maybe_fulfill_demand(state)
   end
 
   @impl true
@@ -96,72 +65,78 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {:ok, %{state | closed: true}}
   end
 
-  defp fulfill_pending_demand(state) do
-    {actions, state} =
-      Enum.map_reduce(state.pending_demand, state, fn {pad, _size}, state ->
-        # NOTE: size is set to 1 to take advantage of the :redemand action.
-        fulfill_actions_on_pad(state, pad, 1)
-      end)
+  defp maybe_fulfill_demand(state = %{state: :waiting_pmt, demuxer_agent: pid}) do
+    pmt = Agent.get(pid, fn demuxer -> TS.Demuxer.get_pmt(demuxer) end)
 
-    actions =
-      actions
-      |> List.flatten()
-      |> Enum.sort(fn
-        {:redemand, _}, {:redemand, _} -> true
-        {:redemand, _}, {_, _} -> false
-        _, _ -> true
-      end)
-
-    {actions, state}
+    if pmt != nil do
+      actions = [{:notify, {:mpeg_ts_pmt, pmt}}]
+      state = %{state | state: :online}
+      {{:ok, actions}, state}
+    else
+      actions = [{:demand, Pad.ref(:input)}]
+      {{:ok, actions}, state}
+    end
   end
 
-  defp fulfill_actions_on_pad(state, pad = {Membrane.Pad, _, {:stream_id, sid}}, size) do
-    {packets, demuxer} = TS.Demuxer.take_from_stream(state.demuxer, sid, size)
-    missing = size - length(packets)
-    {{pad, packets, missing}, demuxer}
+  defp maybe_fulfill_demand(state = %{state: :online, demuxer_agent: pid}) do
+    # Fetch packet buffers for each pad.
+    buf =
+      state.pending_demand
+      |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, _size} ->
+        packets = Agent.get_and_update(pid, fn demuxer -> TS.Demuxer.take!(demuxer, sid, 1) end)
 
-    buffer_actions =
-      packets
-      |> Enum.map(fn {unm = MPEG.TS.PartialPES, packet} ->
-        case unm.unmarshal(packet.payload, packet.is_unit_start) do
-          {:ok, pes} ->
-            pes
+        {pad, packets}
+      end)
 
-          {:error, reason} ->
-            raise ArgumentError,
-                  "MPEG-TS could not parse Partial PES packet: #{inspect(reason)}"
+    # Update pending demand. Remove the pad in case we're going to send
+    # :end_of_stream to it so that it is not referenced anymore.
+    updated_demand =
+      Enum.reduce(buf, state.pending_demand, fn {pad, packets}, acc ->
+        if length(packets) == 0 and state.closed do
+          Map.delete(acc, pad)
+        else
+          Map.update!(acc, pad, fn size -> size - length(packets) end)
         end
       end)
-      |> Enum.map(fn pes -> {:buffer, {pad, %Membrane.Buffer{payload: pes.data}}} end)
 
-    stream_size = TS.Demuxer.stream_size(demuxer, sid)
+    # For each pad that could not be fulfilled, generate a demand action. As
+    # soon as we do not know how the source pad is providing data to us (may be
+    # a TS file for each demand for example), there is no strategy here on how
+    # much to request. If the source has been closed and we do not have more
+    # data, it means we're ready to close the pad.
+    demand_or_close_actions =
+      buf
+      |> Enum.filter(fn {_pad, packets} -> length(packets) == 0 end)
+      |> Enum.map(fn {pad, _} ->
+        if state.closed do
+          {:end_of_stream, pad}
+        else
+          {:demand, Pad.ref(:input)}
+        end
+      end)
+      |> Enum.uniq()
 
-    {actions, state} =
-      cond do
-        stream_size == 0 and state.closed ->
-          # If the pad is not removed from the pending demand, we'll always try
-          # fulfilling it again, even though end_of_stream has already been
-          # reached.
-          pending_demand = Map.delete(state.pending_demand, pad)
-          {buffer_actions ++ [{:end_of_stream, pad}], %{state | pending_demand: pending_demand}}
+    buffer_actions =
+      buf
+      |> Enum.filter(fn {_pad, packets} -> length(packets) > 0 end)
+      |> Enum.flat_map(fn {pad, packets} ->
+        Enum.map(packets, fn x -> {:buffer, {pad, %Membrane.Buffer{payload: x.data}}} end)
+      end)
 
-        length(buffer_actions) > 0 ->
-          pending_demand = Map.put(state.pending_demand, pad, missing)
-          {buffer_actions ++ [{:redemand, pad}], %{state | pending_demand: pending_demand}}
+    actions = demand_or_close_actions ++ buffer_actions
+    state = %{state | pending_demand: updated_demand}
 
-        true ->
-          pending_demand = Map.put(state.pending_demand, pad, missing)
-          {buffer_actions, %{state | pending_demand: pending_demand}}
-      end
-
-    {actions, %{state | demuxer: demuxer}}
+    {{:ok, actions}, state}
   end
 
-  defp forward_demand(state) do
-    actions =
-      state.pending_demand
-      |> Enum.map(fn {_pad, size} -> {:demand, {Pad.ref(:input), size}} end)
+  defp new_state() do
+    {:ok, pid} = Agent.start_link(&TS.Demuxer.new/0)
 
-    {actions, state}
+    %{
+      state: :waiting_pmt,
+      demuxer_agent: pid,
+      pending_demand: %{},
+      closed: false
+    }
   end
 end

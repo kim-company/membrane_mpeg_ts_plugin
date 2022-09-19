@@ -31,7 +31,7 @@ defmodule MPEG.TS.PacketTest do
 
     test "fails when garbage is provided" do
       data = "garbagio"
-      assert {:error, :invalid_data} = Packet.parse(data)
+      assert {:error, :invalid_data, ^data} = Packet.parse(data)
     end
   end
 end

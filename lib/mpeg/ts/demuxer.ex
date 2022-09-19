@@ -6,17 +6,16 @@ defmodule MPEG.TS.Demuxer do
 
   require Logger
 
-  # This equals to 752KB of buffered data at maximum (@max_streams *
+  # This equals to 75.200MB of buffered data at maximum (@max_streams *
   # @max_stream_buffer_size)
   @max_streams 20
-  @max_stream_buffer_size 200
-  @max_tables 10
+  @max_stream_buffer_size 20_000
 
   @type t :: %__MODULE__{
-          known_tables: [PMT.t()],
+          pmt: PMT.t(),
           streams: %{required(PMT.stream_id_t()) => RingBuffer.t()}
         }
-  defstruct known_tables: [], streams: %{}, buffered_bytes: <<>>
+  defstruct [:pmt, streams: %{}, buffered_bytes: <<>>]
 
   @type unmarshaler_t :: Unmarshaler.t() | {Unmarshaler.t(), PMT.stream_id_t()}
 
@@ -42,7 +41,7 @@ defmodule MPEG.TS.Demuxer do
         PMT.is_unmarshable?(x.payload, x.is_unit_start)
       end)
 
-    new_tables =
+    pmt =
       pmt_packets
       |> Enum.map(fn x ->
         case PMT.unmarshal(x.payload, x.is_unit_start) do
@@ -54,20 +53,7 @@ defmodule MPEG.TS.Demuxer do
                   "PMT did not manage to unmarshal packet: #{inspect(x)}, reason: #{inspect(reason)}"
         end
       end)
-      |> Enum.concat(state.known_tables)
-
-    tables =
-      if length(new_tables) > @max_tables do
-        discard = @max_tables - length(new_tables)
-
-        Logger.warn(
-          "discarding #{inspect(discard)} old tables as the stream buffer reached its maxium table capacity"
-        )
-
-        Enum.take(new_tables, @max_tables)
-      else
-        new_tables
-      end
+      |> List.last()
 
     streams =
       other_packets
@@ -87,13 +73,19 @@ defmodule MPEG.TS.Demuxer do
         end
       end)
 
-    %__MODULE__{state | known_tables: tables, streams: streams}
+    %__MODULE__{state | pmt: pmt, streams: streams}
   end
 
-  def has_pmt?(%__MODULE__{known_tables: []}), do: false
-  def has_pmt?(_state), do: true
+  def get_pmt(%__MODULE__{pmt: pmt}), do: pmt
 
-  def take_from_stream(state, stream_id, size \\ 1) do
+  def stream_size(state, stream_id) do
+    case Map.get(state.streams, stream_id) do
+      nil -> 0
+      %RingBuffer{size: size} -> size
+    end
+  end
+
+  def take_raw(state, stream_id, size \\ 1) do
     case Map.get(state.streams, stream_id) do
       nil ->
         {[], state}
@@ -105,18 +97,21 @@ defmodule MPEG.TS.Demuxer do
     end
   end
 
-  def take_pmts(%__MODULE__{known_tables: tables}) do
-    tables
-    |> Enum.filter(fn
-      %PMT{} -> true
-      _ -> true
-    end)
+  def take!(state, stream_id, size \\ 1) do
+    {stream, state} = take_raw(state, stream_id, size)
+    packets = Enum.map(stream, fn x -> unmarshal!(x) end)
+
+    {packets, state}
   end
 
-  def stream_size(state, stream_id) do
-    case Map.get(state.streams, stream_id) do
-      nil -> 0
-      %RingBuffer{size: size} -> size
+  defp unmarshal!({unm, packet}) do
+    case unm.unmarshal(packet.payload, packet.is_unit_start) do
+      {:ok, pes} ->
+        pes
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "MPEG-TS could not parse Partial PES packet: #{inspect(reason)}"
     end
   end
 
@@ -130,13 +125,14 @@ defmodule MPEG.TS.Demuxer do
     # mis-aligned this module should be responsible for fixing it.
     critical_err =
       Enum.find(err, fn
-        {:error, :invalid_packet} -> true
-        {:error, :invalid_data} -> true
+        {:error, :invalid_packet, _} -> true
+        {:error, :invalid_data, _} -> true
         _ -> false
       end)
 
     if critical_err != nil do
-      raise ArgumentError, "MPEG-TS unrecoverable parse error: #{inspect(elem(critical_err, 1))}"
+      raise ArgumentError,
+            "MPEG-TS unrecoverable parse error: #{inspect(critical_err, limit: :infinity)}"
     end
 
     to_buffer =

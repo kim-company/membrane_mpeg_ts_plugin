@@ -45,6 +45,8 @@ defmodule MPEG.TS.PSI do
   end
 
   def unmarshal_header(<<0::8, data::bitstring>>, true), do: unmarshal_header(data)
+  def unmarshal_header(_, true), do: {:error, :invalid_header}
+
   def unmarshal_header(data, false), do: unmarshal_header(data)
 
   def unmarshal_header(<<
