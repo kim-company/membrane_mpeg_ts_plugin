@@ -64,9 +64,7 @@ defmodule MPEG.TS.Packet do
   def packet_size(), do: @ts_packet_size
 
   @spec parse_many(binary()) :: [{:error, parse_error_t(), binary()} | {:ok, t}]
-  def parse_many(data) do
-    for <<packet::binary-@ts_packet_size <- data>>, do: parse(packet)
-  end
+  def parse_many(data), do: parse_many(data, [])
 
   @spec parse_many!(binary()) :: [t]
   def parse_many!(data) do
@@ -84,6 +82,16 @@ defmodule MPEG.TS.Packet do
       {:error, _, _} -> false
     end)
     |> Enum.map(fn {:ok, x} -> x end)
+  end
+
+  defp parse_many(<<>>, acc), do: Enum.reverse(acc)
+
+  defp parse_many(<<packet::binary-@ts_packet_size, rest::binary>>, acc) do
+    parse_many(rest, [parse(packet) | acc])
+  end
+
+  defp parse_many(data, acc) when byte_size(data) < @ts_packet_size do
+    parse_many(<<>>, [parse(data) | acc])
   end
 
   defp parse_adaptation_field(0b01), do: :payload
@@ -123,8 +131,5 @@ defmodule MPEG.TS.Packet do
 
   defp parse_payload(payload, :payload, :psi), do: {:ok, payload}
   defp parse_payload(payload, :payload, :pat), do: {:ok, payload}
-
-  # TODO: I got packets with adaptation_and_payload that do not conform to the
-  # format above and hence create errors.
   defp parse_payload(_, _, _), do: {:error, :unsupported_packet}
 end

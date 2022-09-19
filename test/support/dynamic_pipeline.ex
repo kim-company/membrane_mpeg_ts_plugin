@@ -9,6 +9,7 @@ defmodule Support.DynamicPipeline do
     elements = [
       # Using a chunk_size != 188 ensures that the pipeline is capable of
       # handling buffers that are not exactly the size of TS packet.
+      # in: %File.Source{location: input_path, chunk_size: 512},
       in: %File.Source{location: input_path, chunk_size: 512},
       demuxer: Membrane.MPEG.TS.Demuxer
     ]

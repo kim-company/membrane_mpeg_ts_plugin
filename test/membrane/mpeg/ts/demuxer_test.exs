@@ -27,15 +27,8 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
 
     {:ok, pipeline} = Pipeline.start_link(options)
 
-    # TODO: this function is deprecated but if not called the pipeline is not
-    # starting \o/
-    # Pipeline.play(pipeline)
-
-    # assert_start_of_stream(pipeline, :video_out)
-    # assert_start_of_stream(pipeline, :audio_out)
-
-    assert_end_of_stream(pipeline, :video_out, :input, 10_000)
-    assert_end_of_stream(pipeline, :audio_out, :input, 10_000)
+    assert_end_of_stream(pipeline, :video_out, :input)
+    assert_end_of_stream(pipeline, :audio_out, :input)
     Pipeline.terminate(pipeline, blocking?: true)
 
     assert_files_equal(audio, audio_out)

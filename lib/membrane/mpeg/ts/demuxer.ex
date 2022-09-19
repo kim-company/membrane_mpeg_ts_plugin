@@ -82,8 +82,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
     # Fetch packet buffers for each pad.
     buf =
       state.pending_demand
-      |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, _size} ->
-        packets = Agent.get_and_update(pid, fn demuxer -> TS.Demuxer.take!(demuxer, sid, 1) end)
+      |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, size} ->
+        packets =
+          Agent.get_and_update(pid, fn demuxer -> TS.Demuxer.take!(demuxer, sid, size) end)
 
         {pad, packets}
       end)
@@ -105,16 +106,13 @@ defmodule Membrane.MPEG.TS.Demuxer do
     # much to request. If the source has been closed and we do not have more
     # data, it means we're ready to close the pad.
     demand_or_close_actions =
-      buf
-      |> Enum.filter(fn {_pad, packets} -> length(packets) == 0 end)
-      |> Enum.map(fn {pad, _} ->
-        if state.closed do
-          {:end_of_stream, pad}
-        else
-          {:demand, Pad.ref(:input)}
-        end
-      end)
-      |> Enum.uniq()
+      if state.closed do
+        buf
+        |> Enum.filter(fn {_pad, packets} -> length(packets) == 0 end)
+        |> Enum.map(fn {pad, _} -> {:end_of_stream, pad} end)
+      else
+        [{:demand, Pad.ref(:input)}]
+      end
 
     buffer_actions =
       buf

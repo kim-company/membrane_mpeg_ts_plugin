@@ -143,6 +143,7 @@ defmodule MPEG.TS.Demuxer do
       end)
       |> Enum.map(fn {_, _, data} -> data end)
       |> Enum.reduce(<<>>, fn x, acc -> acc <> x end)
+    IO.inspect(to_buffer, label: "TO BUFFER")
 
     ok = Enum.map(ok, fn {:ok, x} -> x end)
 
