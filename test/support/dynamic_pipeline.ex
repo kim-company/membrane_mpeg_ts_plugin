@@ -7,7 +7,9 @@ defmodule Support.DynamicPipeline do
   @impl true
   def handle_init(%{input_path: input_path} = options) do
     elements = [
-      in: %File.Source{location: input_path, chunk_size: 188},
+      # Using a chunk_size != 188 ensures that the pipeline is capable of
+      # handling buffers that are not exactly the size of TS packet.
+      in: %File.Source{location: input_path, chunk_size: 512},
       demuxer: Membrane.MPEG.TS.Demuxer
     ]
 
