@@ -41,7 +41,7 @@ defmodule MPEG.TS.Demuxer do
         PMT.is_unmarshable?(x.payload, x.is_unit_start)
       end)
 
-    pmt =
+    last_pmt =
       pmt_packets
       |> Enum.map(fn x ->
         case PMT.unmarshal(x.payload, x.is_unit_start) do
@@ -54,6 +54,8 @@ defmodule MPEG.TS.Demuxer do
         end
       end)
       |> List.last()
+
+    pmt = if last_pmt != nil, do: last_pmt, else: state.pmt
 
     streams =
       other_packets
@@ -143,7 +145,6 @@ defmodule MPEG.TS.Demuxer do
       end)
       |> Enum.map(fn {_, _, data} -> data end)
       |> Enum.reduce(<<>>, fn x, acc -> acc <> x end)
-    IO.inspect(to_buffer, label: "TO BUFFER")
 
     ok = Enum.map(ok, fn {:ok, x} -> x end)
 

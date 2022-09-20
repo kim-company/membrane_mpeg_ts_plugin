@@ -9,6 +9,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   ```
   """
   use Membrane.Filter
+  require Membrane.Logger
 
   alias MPEG.TS
 
@@ -48,7 +49,19 @@ defmodule Membrane.MPEG.TS.Demuxer do
     pending = Map.update(state.pending_demand, pad, size, fn old -> old + size end)
     state = %{state | pending_demand: pending}
 
-    maybe_fulfill_demand(state)
+    # If buffers are sent too early (e.g. by always calling fulfill_demand
+    # here), buffers will be re-ordered on the output, as if we where supplying
+    # in a moment where the pipeline is not ready to accept it. To see the
+    # behaviour, check commit 7d1389521763f05b2ebbe921f4382e791daf0a6c.
+    #
+    # On the other hand we have to fulfill demand on newly added pads here if
+    # the stream has been closed as chances are handle_process won't be called
+    # anymore as all input demand has already been processed.
+    if state.closed do
+      fulfill_demand(state)
+    else
+      {{:ok, demand: Pad.ref(:input)}, state}
+    end
   end
 
   @impl true
@@ -57,7 +70,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       TS.Demuxer.push_buffer(demuxer, buffer.payload)
     end)
 
-    maybe_fulfill_demand(state)
+    fulfill_demand(state)
   end
 
   @impl true
@@ -65,7 +78,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {:ok, %{state | closed: true}}
   end
 
-  defp maybe_fulfill_demand(state = %{state: :waiting_pmt, demuxer_agent: pid}) do
+  defp fulfill_demand(state = %{state: :waiting_pmt, demuxer_agent: pid}) do
+    # Eventually I would prefer to drop the state differentiation and notify
+    # the pipeline each time a different PMT table is parsed.
     pmt = Agent.get(pid, fn demuxer -> TS.Demuxer.get_pmt(demuxer) end)
 
     if pmt != nil do
@@ -78,7 +93,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
     end
   end
 
-  defp maybe_fulfill_demand(state = %{state: :online, demuxer_agent: pid}) do
+  defp fulfill_demand(state = %{state: :online, demuxer_agent: pid}) do
     # Fetch packet buffers for each pad.
     buf =
       state.pending_demand
@@ -86,13 +101,15 @@ defmodule Membrane.MPEG.TS.Demuxer do
         packets =
           Agent.get_and_update(pid, fn demuxer -> TS.Demuxer.take!(demuxer, sid, size) end)
 
-        {pad, packets}
+        left = Agent.get(pid, fn demuxer -> TS.Demuxer.stream_size(demuxer, sid) end)
+
+        {pad, packets, left}
       end)
 
     # Update pending demand. Remove the pad in case we're going to send
     # :end_of_stream to it so that it is not referenced anymore.
     updated_demand =
-      Enum.reduce(buf, state.pending_demand, fn {pad, packets}, acc ->
+      Enum.reduce(buf, state.pending_demand, fn {pad, packets, _}, acc ->
         if length(packets) == 0 and state.closed do
           Map.delete(acc, pad)
         else
@@ -107,21 +124,32 @@ defmodule Membrane.MPEG.TS.Demuxer do
     # data, it means we're ready to close the pad.
     demand_or_close_actions =
       if state.closed do
+        Membrane.Logger.debug(closed: true, buf: buf)
+
         buf
-        |> Enum.filter(fn {_pad, packets} -> length(packets) == 0 end)
-        |> Enum.map(fn {pad, _} -> {:end_of_stream, pad} end)
+        |> Enum.filter(fn {_pad, _packets, left} -> left == 0 end)
+        |> Enum.map(fn {pad, _, _} -> {:end_of_stream, pad} end)
       else
         [{:demand, Pad.ref(:input)}]
       end
 
     buffer_actions =
       buf
-      |> Enum.filter(fn {_pad, packets} -> length(packets) > 0 end)
-      |> Enum.flat_map(fn {pad, packets} ->
-        Enum.map(packets, fn x -> {:buffer, {pad, %Membrane.Buffer{payload: x.data}}} end)
+      |> Enum.filter(fn {_pad, packets, _} -> length(packets) > 0 end)
+      |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, packets, _} ->
+        {:buffer,
+         {pad,
+          Enum.map(packets, fn x ->
+            %Membrane.Buffer{
+              payload: x.data,
+              metadata: %{
+                stream_id: sid
+              }
+            }
+          end)}}
       end)
 
-    actions = demand_or_close_actions ++ buffer_actions
+    actions = buffer_actions ++ demand_or_close_actions
     state = %{state | pending_demand: updated_demand}
 
     {{:ok, actions}, state}

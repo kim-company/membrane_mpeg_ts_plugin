@@ -5,12 +5,9 @@ defmodule Support.DynamicPipeline do
   alias Membrane.File
 
   @impl true
-  def handle_init(%{input_path: input_path} = options) do
+  def handle_init(%{input_path: input_path, chunk_size: chunk_size} = options) do
     elements = [
-      # Using a chunk_size != 188 ensures that the pipeline is capable of
-      # handling buffers that are not exactly the size of TS packet.
-      # in: %File.Source{location: input_path, chunk_size: 512},
-      in: %File.Source{location: input_path, chunk_size: 512},
+      in: %File.Source{location: input_path, chunk_size: chunk_size},
       demuxer: Membrane.MPEG.TS.Demuxer
     ]
 
@@ -27,14 +24,9 @@ defmodule Support.DynamicPipeline do
   end
 
   @impl true
-  def handle_notification(
-        {:mpeg_ts_pmt, %MPEG.TS.PMT{streams: streams}},
-        _element,
-        _context,
-        state
-      ) do
+  def handle_notification({:mpeg_ts_pmt, pmt}, _element, _context, state) do
     streams =
-      streams
+      pmt.streams
       |> Enum.filter(fn {_, %{stream_type: type}} ->
         Enum.member?([:H264, :MPEG1_AUDIO, :AAC], type)
       end)
@@ -62,10 +54,6 @@ defmodule Support.DynamicPipeline do
     }
 
     {{:ok, spec: spec}, state}
-  end
-
-  def handle_notification(_notification, _element, _context, state) do
-    {:ok, state}
   end
 
   defp link_from_stream_type(:H264), do: :video_out

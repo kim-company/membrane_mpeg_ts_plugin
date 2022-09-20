@@ -66,4 +66,52 @@ defmodule MPEG.TS.DemuxerTest do
 
     assert state_from_bytes == state_from_packets
   end
+
+  test "works with partial data" do
+    bytes =
+      @all_packets_path
+      |> File.read!()
+
+    one_shot =
+      Demuxer.new()
+      |> Demuxer.push_buffer(bytes)
+
+    chunked =
+      @all_packets_path
+      |> File.open!([:binary])
+      |> IO.binstream(512)
+      |> Enum.reduce(Demuxer.new(), fn buf, d ->
+        Demuxer.push_buffer(d, buf)
+      end)
+
+    assert chunked == one_shot
+
+    stream_id = 256
+    step = 20_000
+    {packets_chunked, _state} = Demuxer.take!(chunked, stream_id, step)
+    {packets_one_shot, _state} = Demuxer.take!(one_shot, stream_id, step)
+
+    assert packets_chunked == packets_one_shot
+  end
+
+  test "allows to take one packet at a time" do
+    get_packets = fn step ->
+      @all_packets_path
+      |> File.read!()
+      |> then(&Demuxer.push_buffer(Demuxer.new(), &1))
+      |> consume_demuxer(256, step, [])
+    end
+
+    assert get_packets.(1000) == get_packets.(1)
+  end
+
+  defp consume_demuxer(state, stream_id, step, acc) do
+    {packets, state} = Demuxer.take!(state, stream_id, step)
+
+    if length(packets) == 0 do
+      acc
+    else
+      consume_demuxer(state, stream_id, step, acc ++ packets)
+    end
+  end
 end
