@@ -118,8 +118,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
     # data, it means we're ready to close the pad.
     demand_or_close_actions =
       if state.closed do
-        Membrane.Logger.debug(closed: true, buf: buf)
-
         buf
         |> Enum.filter(fn {_pad, _packets, left} -> left == 0 end)
         |> Enum.filter(fn {pad, _packets, _} -> Map.has_key?(updated_demand, pad) end)

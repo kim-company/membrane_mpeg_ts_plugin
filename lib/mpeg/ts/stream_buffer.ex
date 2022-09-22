@@ -2,7 +2,7 @@ defmodule MPEG.TS.StreamBuffer do
   alias MPEG.TS.Packet
   require Logger
 
-  @max_stream_buffer_size 20_000
+  @max_stream_buffer_size 2_000_000
 
   @type t :: %__MODULE__{
           buf: RingBuffer.t(),

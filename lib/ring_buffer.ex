@@ -1,4 +1,6 @@
 defmodule RingBuffer do
+  require Logger
+
   @type t :: %__MODULE__{max_size: pos_integer(), size: non_neg_integer(), queue: Qex.t()}
   defstruct [:max_size, size: 0, queue: Qex.new()]
 
@@ -11,6 +13,7 @@ defmodule RingBuffer do
 
   def push(rb = %__MODULE__{size: size, max_size: max, queue: q}, item) when size == max do
     {_, q} = Qex.pop(q)
+    Logger.warn("Ring buffer: discarding packet #{inspect(q)}")
     push(%__MODULE__{rb | queue: q, size: size - 1}, item)
   end
 
