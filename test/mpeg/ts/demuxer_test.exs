@@ -9,8 +9,8 @@ defmodule MPEG.TS.DemuxerTest do
 
   test "empty behaviour" do
     state = Demuxer.new()
-    assert {[], state} = Demuxer.take_raw(state, 2)
-    assert {[], _state} = Demuxer.take_raw(state, 2, 1_000)
+    assert {[], state} = Demuxer.take(state, 2)
+    assert {[], _state} = Demuxer.take(state, 2, 1_000)
   end
 
   test "finds PMT table" do
@@ -43,8 +43,7 @@ defmodule MPEG.TS.DemuxerTest do
       Demuxer.new()
       |> Demuxer.push_packets(packets)
 
-    assert {[{unm = PartialPES, packet}], _state} = Demuxer.take_raw(state, 256, 1)
-    assert {:ok, _pes} = unm.unmarshal(packet.payload, packet.is_unit_start)
+    assert {[%PartialPES{}], _state} = Demuxer.take(state, 256, 1)
   end
 
   test "accepts raw bytes" do
@@ -88,8 +87,8 @@ defmodule MPEG.TS.DemuxerTest do
 
     stream_id = 256
     step = 20_000
-    {packets_chunked, _state} = Demuxer.take!(chunked, stream_id, step)
-    {packets_one_shot, _state} = Demuxer.take!(one_shot, stream_id, step)
+    {packets_chunked, _state} = Demuxer.take(chunked, stream_id, step)
+    {packets_one_shot, _state} = Demuxer.take(one_shot, stream_id, step)
 
     assert packets_chunked == packets_one_shot
   end
@@ -106,7 +105,7 @@ defmodule MPEG.TS.DemuxerTest do
   end
 
   defp consume_demuxer(state, stream_id, step, acc) do
-    {packets, state} = Demuxer.take!(state, stream_id, step)
+    {packets, state} = Demuxer.take(state, stream_id, step)
 
     if length(packets) == 0 do
       acc

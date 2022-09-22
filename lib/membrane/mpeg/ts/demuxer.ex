@@ -98,8 +98,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
     buf =
       state.pending_demand
       |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, size} ->
-        packets =
-          Agent.get_and_update(pid, fn demuxer -> TS.Demuxer.take!(demuxer, sid, size) end)
+        packets = Agent.get_and_update(pid, fn demuxer -> TS.Demuxer.take(demuxer, sid, size) end)
 
         left = Agent.get(pid, fn demuxer -> TS.Demuxer.stream_size(demuxer, sid) end)
 

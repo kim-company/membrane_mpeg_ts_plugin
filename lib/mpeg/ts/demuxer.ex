@@ -3,17 +3,17 @@ defmodule MPEG.TS.Demuxer do
   alias MPEG.TS.Unmarshaler
   alias MPEG.TS.PMT
   alias MPEG.TS.PartialPES
+  alias MPEG.TS.StreamBuffer
 
   require Logger
 
   # This equals to 75.200MB of buffered data at maximum (@max_streams *
   # @max_stream_buffer_size)
   @max_streams 20
-  @max_stream_buffer_size 20_000
 
   @type t :: %__MODULE__{
           pmt: PMT.t(),
-          streams: %{required(PMT.stream_id_t()) => RingBuffer.t()}
+          streams: %{required(PMT.stream_id_t()) => StreamBuffer.t()}
         }
   defstruct [:pmt, streams: %{}, buffered_bytes: <<>>]
 
@@ -63,8 +63,8 @@ defmodule MPEG.TS.Demuxer do
       |> Enum.reduce(state.streams, fn x = %Packet{pid: pid}, streams ->
         if Map.has_key?(streams, pid) or map_size(streams) < @max_streams do
           streams
-          |> Map.get_lazy(pid, fn -> RingBuffer.new(@max_stream_buffer_size) end)
-          |> RingBuffer.push({PartialPES, x})
+          |> Map.get_lazy(pid, fn -> %StreamBuffer{} end)
+          |> StreamBuffer.push(x)
           |> then(&Map.put(streams, pid, &1))
         else
           Logger.warn(
@@ -83,31 +83,25 @@ defmodule MPEG.TS.Demuxer do
   def stream_size(state, stream_id) do
     case Map.get(state.streams, stream_id) do
       nil -> 0
-      %RingBuffer{size: size} -> size
+      stream_buffer -> StreamBuffer.size(stream_buffer)
     end
   end
 
-  def take_raw(state, stream_id, size \\ 1) do
+  def take(state, stream_id, size \\ 1) do
     case Map.get(state.streams, stream_id) do
       nil ->
         {[], state}
 
-      rb ->
-        {items, rb} = RingBuffer.take(rb, size)
-        streams = Map.put(state.streams, stream_id, rb)
-        {items, %__MODULE__{state | streams: streams}}
+      buf ->
+        {items, buf} = StreamBuffer.take(buf, size)
+        packets = Enum.map(items, fn x -> unmarshal_partial_pes!(x) end)
+        streams = Map.put(state.streams, stream_id, buf)
+        {packets, %__MODULE__{state | streams: streams}}
     end
   end
 
-  def take!(state, stream_id, size \\ 1) do
-    {stream, state} = take_raw(state, stream_id, size)
-    packets = Enum.map(stream, fn x -> unmarshal!(x) end)
-
-    {packets, state}
-  end
-
-  defp unmarshal!({unm, packet}) do
-    case unm.unmarshal(packet.payload, packet.is_unit_start) do
+  defp unmarshal_partial_pes!(packet) do
+    case PartialPES.unmarshal(packet.payload, packet.is_unit_start) do
       {:ok, pes} ->
         pes
 
