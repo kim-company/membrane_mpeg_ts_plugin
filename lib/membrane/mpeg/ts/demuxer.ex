@@ -13,7 +13,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   alias MPEG.TS
 
-  def_input_pad(:input, caps: :any, demand_unit: :buffers)
+  def_input_pad(:input, caps: :any, demand_unit: :buffers, demand_mode: :manual)
   def_output_pad(:output, availability: :on_request, caps: :any)
 
   @type state_t :: :waiting_pmt | :online
@@ -41,7 +41,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   def handle_prepared_to_playing(_ctx, state) do
     # Output pad is connected after a PMT table is recognized, hence we have to
     # ask for the first packets by ourselves.
-    {{:ok, demand: Pad.ref(:input)}, state}
+    {{:ok, demand: {Pad.ref(:input), 1}}, state}
   end
 
   @impl true
@@ -60,7 +60,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
     if state.closed do
       fulfill_demand(state)
     else
-      {{:ok, demand: Pad.ref(:input)}, state}
+      {{:ok, demand: {Pad.ref(:input), 1}}, state}
     end
   end
 
@@ -88,7 +88,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       state = %{state | state: :online}
       {{:ok, actions}, state}
     else
-      actions = [{:demand, Pad.ref(:input)}]
+      actions = [{:demand, {Pad.ref(:input), 1}}]
       {{:ok, actions}, state}
     end
   end
@@ -123,7 +123,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
         |> Enum.filter(fn {pad, _packets, _} -> Map.has_key?(updated_demand, pad) end)
         |> Enum.map(fn {pad, _, _} -> {:end_of_stream, pad} end)
       else
-        [{:demand, Pad.ref(:input)}]
+        [{:demand, {Pad.ref(:input), 1}}]
       end
 
     # Now we know which pads will received an :end_of_stream action. Remove
