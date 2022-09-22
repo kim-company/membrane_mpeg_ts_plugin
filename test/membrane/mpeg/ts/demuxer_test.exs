@@ -67,11 +67,10 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     defp link_from_stream_type(:AAC), do: :audio_out
   end
 
-  @tag :tmp_dir
-  test "demuxes reference", %{tmp_dir: tmp_dir} do
+  defp test_pipeline(fixture_dir, tmp_dir) do
     [input, audio, video] =
       ["all.ts", "audio.ts", "video.ts"]
-      |> Enum.map(&Path.join(["test", "fixtures", "reference", &1]))
+      |> Enum.map(&Path.join(["test", "fixtures", fixture_dir, &1]))
 
     video_out = Path.join([tmp_dir, "video.ts"])
     audio_out = Path.join([tmp_dir, "audio.ts"])
@@ -103,5 +102,15 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     assert {:ok, b} = File.read(file_b)
     assert byte_size(a) == byte_size(b)
     assert a == b
+  end
+
+  @tag :tmp_dir
+  test "demuxes bundestag example", %{tmp_dir: tmp_dir} do
+    test_pipeline("bundestag", tmp_dir)
+  end
+
+  @tag :tmp_dir
+  test "demuxes reference", %{tmp_dir: tmp_dir} do
+    test_pipeline("reference", tmp_dir)
   end
 end

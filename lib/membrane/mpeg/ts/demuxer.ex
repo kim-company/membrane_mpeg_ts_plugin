@@ -105,15 +105,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
         {pad, packets, left}
       end)
 
-    # Update pending demand. Remove the pad in case we're going to send
-    # :end_of_stream to it so that it is not referenced anymore.
+    # Given the buffers obtained for each pad, update their demand.
     updated_demand =
       Enum.reduce(buf, state.pending_demand, fn {pad, packets, _}, acc ->
-        if length(packets) == 0 and state.closed do
-          Map.delete(acc, pad)
-        else
-          Map.update!(acc, pad, fn size -> size - length(packets) end)
-        end
+        Map.update!(acc, pad, fn size -> size - length(packets) end)
       end)
 
     # For each pad that could not be fulfilled, generate a demand action. As
@@ -127,10 +122,21 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
         buf
         |> Enum.filter(fn {_pad, _packets, left} -> left == 0 end)
+        |> Enum.filter(fn {pad, _packets, _} -> Map.has_key?(updated_demand, pad) end)
         |> Enum.map(fn {pad, _, _} -> {:end_of_stream, pad} end)
       else
         [{:demand, Pad.ref(:input)}]
       end
+
+    # Now we know which pads will received an :end_of_stream action. Remove
+    # them from the pending_demand map to avoid sending messages to these pads
+    # again.
+    updated_demand =
+      demand_or_close_actions
+      |> Enum.filter(fn {action, _} -> action == :end_of_stream end)
+      |> Enum.reduce(state.pending_demand, fn {_, pad}, acc ->
+        Map.delete(acc, pad)
+      end)
 
     buffer_actions =
       buf
