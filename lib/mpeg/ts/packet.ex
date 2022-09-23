@@ -3,22 +3,37 @@ defmodule MPEG.TS.Packet do
   @ts_header_size 4
   @ts_payload_size @ts_packet_size - @ts_header_size
 
-  @type adaptation_t :: :payload | :adaptation | :adaptation_and_payload | :reserved
+  @type adaptation_control_t :: :payload | :adaptation | :adaptation_and_payload | :reserved
 
   @type scrambling_t :: :no | :even_key | :odd_key | :reserved
 
   @type pid_class_t :: :pat | :psi | :null_packet | :unsupported
   @type pid_t :: pos_integer()
 
+  @type adaptation_t :: %{}
+
   @type payload_t :: bitstring()
   @type t :: %__MODULE__{
           payload: payload_t(),
-          is_unit_start: boolean(),
+          # payload unit start indicator
+          pusi: boolean(),
           pid: pid_t(),
           continuity_counter: binary(),
-          scrambling: scrambling_t()
+          scrambling: scrambling_t(),
+          discontinuity_indicator: boolean(),
+          random_access_indicator: boolean(),
+          pcr: pos_integer()
         }
-  defstruct [:payload, :is_unit_start, :pid, :continuity_counter, :scrambling]
+  defstruct [
+    :payload,
+    :pusi,
+    :pid,
+    :continuity_counter,
+    :scrambling,
+    :discontinuity_indicator,
+    :random_access_indicator,
+    :pcr
+  ]
 
   @type parse_error_t ::
           :invalid_data | :invalid_packet | :unsupported_packet
@@ -38,19 +53,23 @@ defmodule MPEG.TS.Packet do
           optional_fields::@ts_payload_size-binary
         >>
       ) do
-    with adaptation_field_id = parse_adaptation_field(adaptation_field_control),
+    with adaptation_field_id = parse_adaptation_field_control(adaptation_field_control),
          pid_class = parse_pid_class(pid),
-         pusi = parse_pusi(payload_unit_start_indicator),
+         pusi = parse_flag(payload_unit_start_indicator),
          scrambling = parse_scrambling_control(transport_scrambling_control),
-         {:ok, data} <- parse_payload(optional_fields, adaptation_field_id, pid_class) do
-      {:ok,
-       %__MODULE__{
-         is_unit_start: pusi,
-         pid: pid,
-         payload: data,
-         scrambling: scrambling,
-         continuity_counter: continuity_counter
-       }}
+         {:ok, adaptation, data} <- parse_payload(optional_fields, adaptation_field_id, pid_class) do
+      packet = %__MODULE__{
+        pusi: pusi,
+        pid: pid,
+        payload: data,
+        scrambling: scrambling,
+        continuity_counter: continuity_counter,
+        discontinuity_indicator: Map.get(adaptation, :discontinuity_indicator, false),
+        random_access_indicator: Map.get(adaptation, :random_access_indicator, false),
+        pcr: Map.get(adaptation, :pcr, nil)
+      }
+
+      {:ok, packet}
     else
       {:error, reason} -> {:error, reason, data}
     end
@@ -94,10 +113,10 @@ defmodule MPEG.TS.Packet do
     parse_many(<<>>, [parse(data) | acc])
   end
 
-  defp parse_adaptation_field(0b01), do: :payload
-  defp parse_adaptation_field(0b10), do: :adaptation
-  defp parse_adaptation_field(0b11), do: :adaptation_and_payload
-  defp parse_adaptation_field(0b00), do: :reserved
+  defp parse_adaptation_field_control(0b01), do: :payload
+  defp parse_adaptation_field_control(0b10), do: :adaptation
+  defp parse_adaptation_field_control(0b11), do: :adaptation_and_payload
+  defp parse_adaptation_field_control(0b00), do: :reserved
 
   defp parse_scrambling_control(0b00), do: :no
   defp parse_scrambling_control(0b01), do: :reserved
@@ -109,27 +128,78 @@ defmodule MPEG.TS.Packet do
   defp parse_pid_class(0x1FFF), do: :null_packet
   defp parse_pid_class(_), do: :unsupported
 
-  defp parse_pusi(0b1), do: true
-  defp parse_pusi(0b0), do: false
+  defp parse_flag(0b1), do: true
+  defp parse_flag(0b0), do: false
 
-  @spec parse_payload(binary(), adaptation_t(), pid_class_t()) ::
-          {:ok, bitstring()} | {:error, parse_error_t()}
-  defp parse_payload(_, :adaptation, _), do: {:ok, <<>>}
+  @spec parse_payload(binary(), adaptation_control_t(), pid_class_t()) ::
+          {:ok, Map.t(), bitstring()} | {:error, parse_error_t()}
+  defp parse_payload(data, :adaptation, _) do
+    with {:ok, adaptation} <- parse_adaptation_field(data) do
+      {:ok, adaptation, <<>>}
+    end
+  end
+
   defp parse_payload(_, :reserved, _), do: {:error, :unsupported_packet}
-  defp parse_payload(_, :payload, :null_packet), do: {:ok, <<>>}
+  defp parse_payload(_, :payload, :null_packet), do: {:ok, %{}, <<>>}
 
   defp parse_payload(
          <<
            adaptation_field_length::8,
-           _adaptation_field::binary-size(adaptation_field_length),
+           adaptation_field::binary-size(adaptation_field_length),
            payload::bitstring
          >>,
          :adaptation_and_payload,
          pid
-       ),
-       do: parse_payload(payload, :payload, pid)
+       ) do
+    with {:ok, %{}, payload} <- parse_payload(payload, :payload, pid),
+         {:ok, adaptation} <- parse_adaptation_field(adaptation_field) do
+      {:ok, adaptation, payload}
+    end
+  end
 
-  defp parse_payload(payload, :payload, :psi), do: {:ok, payload}
-  defp parse_payload(payload, :payload, :pat), do: {:ok, payload}
+  defp parse_payload(payload, :payload, :psi), do: {:ok, %{}, payload}
+  defp parse_payload(payload, :payload, :pat), do: {:ok, %{}, payload}
   defp parse_payload(_, _, _), do: {:error, :unsupported_packet}
+
+  defp parse_adaptation_field(<<
+         discontinuity_indicator::1,
+         random_access_indicator::1,
+         _elementary_stream_priority_indicator::1,
+         has_pcr::1,
+         _has_opcr::1,
+         _has_splicing_point::1,
+         _is_transport_private_data::1,
+         _has_adaptation_field_extension::1,
+         rest::binary
+       >>) do
+    discontinuity_indicator = parse_flag(discontinuity_indicator)
+    random_access_indicator = parse_flag(random_access_indicator)
+    has_pcr = parse_flag(has_pcr)
+
+    adaptation =
+      if has_pcr do
+        {pcr, _} = parse_pcr(rest)
+        %{pcr: pcr}
+      else
+        %{}
+      end
+
+    adaptation =
+      Map.merge(adaptation, %{
+        discontinuity_indicator: discontinuity_indicator,
+        random_access_indicator: random_access_indicator
+      })
+
+    {:ok, adaptation}
+  end
+
+  defp parse_pcr(<<
+         base::33,
+         _reserved::6,
+         extension::9,
+         rest::binary
+       >>) do
+    pcr = base * 300 + extension
+    {pcr, rest}
+  end
 end

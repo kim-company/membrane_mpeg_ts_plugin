@@ -31,7 +31,7 @@ defmodule MPEG.TS.PMTTest do
   describe "PMT unmarshaler" do
     test "unmarshals valid packet" do
       {:ok, packet} = Packet.parse(Factory.pmt_packet())
-      assert {:ok, %PMT{}} = PMT.unmarshal(packet.payload, packet.is_unit_start)
+      assert {:ok, %PMT{}} = PMT.unmarshal(packet.payload, packet.pusi)
     end
   end
 end

@@ -6,6 +6,8 @@ defmodule RingBuffer do
 
   def new(size) when size > 0, do: %__MODULE__{max_size: size}
 
+  def size(%__MODULE__{size: size}), do: size
+
   def push(%__MODULE__{size: size, max_size: max}, _item) when size > max do
     raise ArgumentError,
           "RingBuffer exceeded its maximum size: have #{inspect(size)}, max was #{inspect(max)}"
