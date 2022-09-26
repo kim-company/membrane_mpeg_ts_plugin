@@ -10,6 +10,7 @@ defmodule MPEG.TS.StreamQueue do
   alias MPEG.TS.PartialPES
   alias MPEG.TS.PES
 
+  @derive Inspect
   defstruct [:stream_id, :partials, :ready]
 
   def new(stream_id) do
@@ -20,6 +21,14 @@ defmodule MPEG.TS.StreamQueue do
     {complete_chunks, [partials]} =
       partials
       |> Qex.join(Qex.new(packets))
+      |> Enum.map(fn x = %Packet{pid: pid} ->
+        if pid != state.stream_id do
+          raise ArgumentError,
+                "#{inspect(state)} received a packet belonging to stream #{inspect(pid)}"
+        end
+
+        x
+      end)
       |> Enum.reduce([], fn
         x = %Packet{pusi: true}, acc ->
           [[x] | acc]
