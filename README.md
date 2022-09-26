@@ -2,6 +2,8 @@
 MPEG-TS Demuxer that implements the Membrane.Filter behaviour. Takes
 table/packet parsing code from `membraneframework/membrane_mpegts_plugin`.
 
-## NOTES
-* the MPEG demuxer is extracting LESS data than available in the original
-  stream. I compared the output extracted with our tool and with ffmpeg.
+## TODOS
+* [ ] Filter out streams we're not following to avoid an overflow. Consider
+  setting a maximum limit on the partial packets the StreamQueue may collect.
+
+
