@@ -24,6 +24,15 @@ defmodule MPEG.TS.Packet do
           random_access_indicator: boolean(),
           pcr: pos_integer()
         }
+  @derive {Inspect,
+           only: [
+             :pid,
+             :pusi,
+             :continuity_counter,
+             :discontinuity_indicator,
+             :random_access_indicator,
+             :payload
+           ]}
   defstruct [
     :payload,
     :pusi,

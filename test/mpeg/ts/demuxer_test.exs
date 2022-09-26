@@ -2,7 +2,7 @@ defmodule MPEG.TS.DemuxerTest do
   use ExUnit.Case
 
   alias MPEG.TS.Demuxer
-  alias MPEG.TS.PartialPES
+  alias MPEG.TS.PES
   alias MPEG.TS.Packet
 
   @all_packets_path "./test/fixtures/reference/all.ts"
@@ -19,7 +19,7 @@ defmodule MPEG.TS.DemuxerTest do
       |> File.read!()
       |> Packet.parse_valid()
 
-    state =
+    %Demuxer{pmt: pmt} =
       Demuxer.new()
       |> Demuxer.push_packets(packets)
 
@@ -30,7 +30,7 @@ defmodule MPEG.TS.DemuxerTest do
                256 => %{stream_type: :H264, stream_type_id: 27},
                257 => %{stream_type: :MPEG1_AUDIO, stream_type_id: 3}
              }
-           } == Demuxer.get_pmt(state)
+           } == pmt
   end
 
   test "demuxes PES stream" do
@@ -43,7 +43,7 @@ defmodule MPEG.TS.DemuxerTest do
       Demuxer.new()
       |> Demuxer.push_packets(packets)
 
-    assert {[%PartialPES{}], _state} = Demuxer.take(state, 256, 1)
+    assert {[%PES{}], _state} = Demuxer.take(state, 256, 1)
   end
 
   test "accepts raw bytes" do
@@ -67,30 +67,32 @@ defmodule MPEG.TS.DemuxerTest do
   end
 
   test "works with partial data" do
-    bytes =
-      @all_packets_path
-      |> File.read!()
-
     one_shot =
       Demuxer.new()
-      |> Demuxer.push_buffer(bytes)
+      |> Demuxer.push_buffer(File.read!(@all_packets_path))
+      |> Demuxer.end_of_stream()
 
     chunked =
       @all_packets_path
       |> File.open!([:binary])
       |> IO.binstream(512)
-      |> Enum.reduce(Demuxer.new(), fn buf, d ->
-        Demuxer.push_buffer(d, buf)
-      end)
-
-    assert chunked == one_shot
+      |> Enum.reduce(Demuxer.new(), fn buf, d -> Demuxer.push_buffer(d, buf) end)
+      |> Demuxer.end_of_stream()
 
     stream_id = 256
-    step = 20_000
-    {packets_chunked, _state} = Demuxer.take(chunked, stream_id, step)
-    {packets_one_shot, _state} = Demuxer.take(one_shot, stream_id, step)
+    amount = 20_000
+    {packets_chunked, _state} = Demuxer.take(chunked, stream_id, amount)
+    {packets_one_shot, _state} = Demuxer.take(one_shot, stream_id, amount)
 
-    assert packets_chunked == packets_one_shot
+    assert length(packets_chunked) == length(packets_one_shot)
+
+    packets_chunked
+    |> Enum.zip(packets_one_shot)
+    |> Enum.with_index()
+    |> Enum.each(fn {{chunked, one_shot}, index} ->
+      assert chunked == one_shot,
+             "packet #{index}/#{length(packets_chunked) - 1}:\n\tone_shot=#{inspect(one_shot, binaries: :as_strings)}\n\tchunked=#{inspect(chunked, binaries: :as_strings)}"
+    end)
   end
 
   test "allows to take one packet at a time" do

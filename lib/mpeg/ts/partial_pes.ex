@@ -5,45 +5,43 @@ defmodule MPEG.TS.PartialPES do
   Partial Packetized Elemetary Stream. PES packets are much larger in size than
   TS packets are. This means that they have to be unmarshaled from a series of
   payloads, hence each packet here will only contain a partial PES packet.
+
+  PTS and DTS aare in milliseconds.
   """
-  @type t :: %__MODULE__{data: binary(), stream_id: pos_integer()}
-  defstruct [:data, :stream_id]
+  @type t :: %__MODULE__{
+          data: binary(),
+          stream_id: pos_integer(),
+          pts: pos_integer(),
+          dts: pos_integer()
+        }
+  defstruct [:data, :stream_id, :pts, :dts]
 
   @impl true
-  def is_unmarshable?(_data, false), do: true
+  def is_unmarshable?(_data, false) do
+    true
+  end
 
-  def is_unmarshable?(
-        <<
-          1::24,
-          _stream_id::8,
-          _packet_length::16,
-          _optional_fields::bitstring
-        >>,
-        true
-      ),
-      do: true
+  def is_unmarshable?(<<1::24, _stream_id::8, _length::16, _optional::bitstring>>, true) do
+    true
+  end
 
-  def is_unmarshable?(_data, _true), do: false
+  def is_unmarshable?(_data, _true) do
+    false
+  end
 
   @impl true
-  def unmarshal(
-        <<
-          1::24,
-          stream_id::8,
-          _packet_length::16,
-          optional_fields::bitstring
-        >>,
-        true
-      ) do
+  def unmarshal(<<1::24, stream_id::8, _packet_length::16, optional_fields::bitstring>>, true) do
     # Packet length is ignored as the field is also allowed to be zero in case
     # the payload is a video elementary stream. If the PES packet length is set
     # to zero, the PES packet can be of any length.
-    case parse_optional(optional_fields, has_header?(stream_id)) do
-      {:ok, _header, data} ->
-        {:ok, %__MODULE__{data: data, stream_id: stream_id}}
-
-      err = {:error, _reason} ->
-        err
+    with {:ok, optional, payload} <- parse_optional(optional_fields, has_header?(stream_id)) do
+      {:ok,
+       %__MODULE__{
+         data: payload,
+         stream_id: stream_id,
+         dts: Map.get(optional, :dts),
+         pts: Map.get(optional, :pts)
+       }}
     end
   end
 
@@ -57,7 +55,7 @@ defmodule MPEG.TS.PartialPES do
   defp has_header?(0b10111111), do: false
   defp has_header?(_other), do: true
 
-  defp parse_optional(data, false), do: {:ok, %{}, data}
+  defp parse_optional(<<_sub_stream_id::8, rest>>, false), do: {:ok, %{}, rest}
 
   defp parse_optional(
          <<
@@ -97,27 +95,51 @@ defmodule MPEG.TS.PartialPES do
   defp parse_pts_dts_indicator(0b00), do: :none
 
   # http://dvd.sourceforge.net/dvdinfo/pes-hdr.html
+  # https://en.wikipedia.org/wiki/Presentation_timestamp
   defp parse_pts_dts_field(
          <<0b0010::4, chunk_one::bitstring-3, 0b1::1, chunk_two::bitstring-15, 0b1::1,
            chunk_three::bitstring-15, 0b1::1, rest::bitstring>>,
          :only_pts
        ) do
-    # PTS is a 33bit thing. If we add 7 it becomes a binary which can be
-    # interpreted as a binary.
-    <<pts::40>> = <<0b0::7, chunk_one::bitstring, chunk_two::bitstring, chunk_three::bitstring>>
-
-    # TODO: raw PTS needs to be converted to a Membrane.Time unit at some point.
-    {:ok, %{pts: pts}, rest}
+    {:ok, %{pts: parse_pts_or_dts_chunks(chunk_one, chunk_two, chunk_three)}, rest}
   end
 
-  defp parse_pts_dts_field(data, flag) when flag in [:pts_and_dts, :forbidden, :none] do
-    IO.inspect(data,
-      label: "#{inspect(flag)}-#{inspect(byte_size(data))}",
-      binaries: :as_binaries,
-      base: :binary,
-      limit: :infinity
-    )
+  defp parse_pts_dts_field(
+         <<
+           0b0011::4,
+           pts_chunk_one::bitstring-3,
+           0b1::1,
+           pts_chunk_two::bitstring-15,
+           0b1::1,
+           pts_chunk_three::bitstring-15,
+           0b1::1,
+           0b0001::4,
+           dts_chunk_one::bitstring-3,
+           0b1::1,
+           dts_chunk_two::bitstring-15,
+           0b1::1,
+           dts_chunk_three::bitstring-15,
+           0b1::1,
+           rest::bitstring
+         >>,
+         :pts_and_dts
+       ) do
+    {:ok,
+     %{
+       pts: parse_pts_or_dts_chunks(pts_chunk_one, pts_chunk_two, pts_chunk_three),
+       dts: parse_pts_or_dts_chunks(dts_chunk_one, dts_chunk_two, dts_chunk_three)
+     }, rest}
+  end
 
+  defp parse_pts_dts_field(data, _indicator) do
     {:ok, %{}, data}
+  end
+
+  defp parse_pts_or_dts_chunks(chunk_one, chunk_two, chunk_three) do
+    # PTS is a 33bit thing. If we add 7 it becomes a binary which can be
+    # interpreted as a binary.
+    <<ts::40>> = <<0b0::7, chunk_one::bitstring, chunk_two::bitstring, chunk_three::bitstring>>
+    # PTS and DTS originate from a 90kHz clock. This gives the milliseconds.
+    ts / 90
   end
 end

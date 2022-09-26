@@ -74,14 +74,15 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_end_of_stream(:input, _ctx, state) do
+  def handle_end_of_stream(:input, _ctx, state = %{demuxer_agent: pid}) do
+    Agent.update(pid, fn demuxer -> TS.Demuxer.end_of_stream(demuxer) end)
     {:ok, %{state | closed: true}}
   end
 
   defp fulfill_demand(state = %{state: :waiting_pmt, demuxer_agent: pid}) do
     # Eventually I would prefer to drop the state differentiation and notify
     # the pipeline each time a different PMT table is parsed.
-    pmt = Agent.get(pid, fn demuxer -> TS.Demuxer.get_pmt(demuxer) end)
+    pmt = Agent.get(pid, fn %TS.Demuxer{pmt: pmt} -> pmt end)
 
     if pmt != nil do
       actions = [{:notify, {:mpeg_ts_pmt, pmt}}]
@@ -100,7 +101,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, size} ->
         packets = Agent.get_and_update(pid, fn demuxer -> TS.Demuxer.take(demuxer, sid, size) end)
 
-        left = Agent.get(pid, fn demuxer -> TS.Demuxer.stream_size(demuxer, sid) end)
+        left = Agent.get(pid, fn demuxer -> TS.Demuxer.size(demuxer, sid) end)
 
         {pad, packets, left}
       end)
