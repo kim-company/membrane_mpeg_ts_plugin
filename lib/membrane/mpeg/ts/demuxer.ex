@@ -146,6 +146,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
           Enum.map(packets, fn x ->
             %Membrane.Buffer{
               payload: x.data,
+              pts: parse_pts_or_dts(x.pts),
+              dts: parse_pts_or_dts(x.dts),
               metadata: %{
                 stream_id: sid
               }
@@ -158,6 +160,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
     {{:ok, actions}, state}
   end
+
+  defp parse_pts_or_dts(nil), do: nil
+  defp parse_pts_or_dts(pts), do: Membrane.Time.milliseconds(trunc(pts))
 
   defp new_state() do
     {:ok, pid} = Agent.start_link(&TS.Demuxer.new/0)
