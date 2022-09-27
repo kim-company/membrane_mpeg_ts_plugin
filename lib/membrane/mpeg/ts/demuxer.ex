@@ -13,6 +13,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   alias MPEG.TS
 
+  @h264_time_base 90_000
+
   def_input_pad(:input, caps: :any, demand_unit: :buffers, demand_mode: :manual)
   def_output_pad(:output, availability: :on_request, caps: :any)
 
@@ -162,7 +164,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   defp parse_pts_or_dts(nil), do: nil
-  defp parse_pts_or_dts(pts), do: Membrane.Time.milliseconds(trunc(pts))
+
+  defp parse_pts_or_dts(ts) do
+    use Ratio
+    (ts * Membrane.Time.second() / @h264_time_base) |> Ratio.trunc()
+  end
 
   defp new_state() do
     {:ok, pid} = Agent.start_link(&TS.Demuxer.new/0)

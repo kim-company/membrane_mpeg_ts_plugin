@@ -5,8 +5,6 @@ defmodule MPEG.TS.PartialPES do
   Partial Packetized Elemetary Stream. PES packets are much larger in size than
   TS packets are. This means that they have to be unmarshaled from a series of
   payloads, hence each packet here will only contain a partial PES packet.
-
-  PTS and DTS aare in milliseconds.
   """
   @type t :: %__MODULE__{
           data: binary(),
@@ -140,6 +138,7 @@ defmodule MPEG.TS.PartialPES do
     # interpreted as a binary.
     <<ts::40>> = <<0b0::7, chunk_one::bitstring, chunk_two::bitstring, chunk_three::bitstring>>
     # PTS and DTS originate from a 90kHz clock. This gives the milliseconds.
-    ts / 90
+
+    ts
   end
 end
