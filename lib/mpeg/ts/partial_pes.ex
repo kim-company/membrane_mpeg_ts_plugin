@@ -1,6 +1,8 @@
 defmodule MPEG.TS.PartialPES do
   @behaviour MPEG.TS.Unmarshaler
 
+  @ts_clock_hz 90_000
+
   @moduledoc """
   Partial Packetized Elemetary Stream. PES packets are much larger in size than
   TS packets are. This means that they have to be unmarshaled from a series of
@@ -13,6 +15,8 @@ defmodule MPEG.TS.PartialPES do
           dts: pos_integer()
         }
   defstruct [:data, :stream_id, :pts, :dts]
+
+  require Logger
 
   @impl true
   def is_unmarshable?(_data, false) do
@@ -99,7 +103,8 @@ defmodule MPEG.TS.PartialPES do
            chunk_three::bitstring-15, 0b1::1, rest::bitstring>>,
          :only_pts
        ) do
-    {:ok, %{pts: parse_pts_or_dts_chunks(chunk_one, chunk_two, chunk_three)}, rest}
+    pts = parse_pts_or_dts_chunks(chunk_one, chunk_two, chunk_three)
+    {:ok, %{pts: pts, dts: pts}, rest}
   end
 
   defp parse_pts_dts_field(
@@ -122,11 +127,16 @@ defmodule MPEG.TS.PartialPES do
          >>,
          :pts_and_dts
        ) do
-    {:ok,
-     %{
-       pts: parse_pts_or_dts_chunks(pts_chunk_one, pts_chunk_two, pts_chunk_three),
-       dts: parse_pts_or_dts_chunks(dts_chunk_one, dts_chunk_two, dts_chunk_three)
-     }, rest}
+    pts = parse_pts_or_dts_chunks(pts_chunk_one, pts_chunk_two, pts_chunk_three)
+    dts = parse_pts_or_dts_chunks(dts_chunk_one, dts_chunk_two, dts_chunk_three)
+
+    if pts - dts > 60 * @ts_clock_hz do
+      # https://github.com/video-dev/hls.js/blob/c14628668e04d14f0217d0118f7e768933524c6d/src/demux/tsdemuxer.ts#L1106
+      Logger.warn("#{round((pts - dts) / @ts_clock_hz)} delta between PTS and DTS. Aligning them using DTS.")
+      {:ok, %{pts: dts, dts: dts}, rest}
+    else
+      {:ok, %{pts: pts, dts: dts}, rest}
+    end
   end
 
   defp parse_pts_dts_field(data, _indicator) do
@@ -135,10 +145,9 @@ defmodule MPEG.TS.PartialPES do
 
   defp parse_pts_or_dts_chunks(chunk_one, chunk_two, chunk_three) do
     # PTS is a 33bit thing. If we add 7 it becomes a binary which can be
-    # interpreted as a binary.
+    # interpreted as a binary and hence an integer.
+    # PTS and DTS originate from a 90kHz clock.
     <<ts::40>> = <<0b0::7, chunk_one::bitstring, chunk_two::bitstring, chunk_three::bitstring>>
-    # PTS and DTS originate from a 90kHz clock. This gives the milliseconds.
-
     ts
   end
 end
