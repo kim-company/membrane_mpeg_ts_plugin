@@ -37,8 +37,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_prepared_to_stopped(_ctx, %{demuxer_agent: pid}) do
-    Agent.stop(pid, :normal)
+  def handle_prepared_to_stopped(_ctx, _state) do
     {:ok, new_state()}
   end
 
@@ -70,40 +69,41 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_process(:input, buffer, _ctx, state = %{demuxer_agent: pid}) do
-    Agent.update(pid, fn demuxer ->
-      TS.Demuxer.push_buffer(demuxer, buffer.payload)
-    end)
-
-    fulfill_demand(state)
+  def handle_process(:input, buffer, _ctx, state) do
+    state
+    |> update_in([:demuxer], &TS.Demuxer.push_buffer(&1, buffer.payload))
+    |> fulfill_demand()
   end
 
   @impl true
-  def handle_end_of_stream(:input, _ctx, state = %{demuxer_agent: pid}) do
-    Agent.update(pid, fn demuxer -> TS.Demuxer.end_of_stream(demuxer) end)
-    {:ok, %{state | closed: true}}
+  def handle_end_of_stream(:input, _ctx, state) do
+    demuxer = TS.Demuxer.end_of_stream(state.demuxer)
+    {:ok, %{state | closed: true, demuxer: demuxer}}
   end
 
   @impl true
-  def handle_other(:start_stream_filter, _ctx, state = %{pending_demand: demand, demuxer_agent: agent}) do
+  def handle_other(
+        :start_stream_filter,
+        _ctx,
+        state = %{pending_demand: demand}
+      ) do
     # Remove unfollowed tracks.
     followed_stream_ids = Enum.map(demand, fn {{_, _, {:stream_id, sid}}, _} -> sid end)
-    Agent.update(agent, fn demuxer -> %TS.Demuxer{demuxer | packet_filter: fn pid ->
-      pid in followed_stream_ids
-    end} end)
+
+    demuxer = %TS.Demuxer{state.demuxer | packet_filter: &(&1 in followed_stream_ids)}
 
     Logger.warn(
-      "PES filtering enabled. Following streams #{inspect followed_stream_ids}",
+      "PES filtering enabled. Following streams #{inspect(followed_stream_ids)}",
       domain: __MODULE__
     )
 
-    {:ok, state}
+    {:ok, %{state | demuxer: demuxer}}
   end
 
-  defp fulfill_demand(state = %{state: :waiting_pmt, demuxer_agent: pid}) do
+  defp fulfill_demand(state = %{state: :waiting_pmt}) do
     # Eventually I would prefer to drop the state differentiation and notify
     # the pipeline each time a different PMT table is parsed.
-    pmt = Agent.get(pid, fn %TS.Demuxer{pmt: pmt} -> pmt end)
+    pmt = state.demuxer.pmt
 
     if pmt != nil do
       Process.send_after(self(), :start_stream_filter, @stream_filter_timeout)
@@ -116,16 +116,15 @@ defmodule Membrane.MPEG.TS.Demuxer do
     end
   end
 
-  defp fulfill_demand(state = %{state: :online, demuxer_agent: pid}) do
+  defp fulfill_demand(state = %{state: :online, demuxer: demuxer}) do
     # Fetch packet buffers for each pad.
-    buf =
+    {buf, demuxer} =
       state.pending_demand
-      |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, size} ->
-        packets = Agent.get_and_update(pid, fn demuxer -> TS.Demuxer.take(demuxer, sid, size) end)
+      |> Enum.map_reduce(demuxer, fn {pad = {_, _, {:stream_id, sid}}, size}, demuxer ->
+        {packets, demuxer} = TS.Demuxer.take(demuxer, sid, size)
+        left = TS.Demuxer.size(demuxer, sid)
 
-        left = Agent.get(pid, fn demuxer -> TS.Demuxer.size(demuxer, sid) end)
-
-        {pad, packets, left}
+        {{pad, packets, left}, demuxer}
       end)
 
     # Given the buffers obtained for each pad, update their demand.
@@ -178,7 +177,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       end)
 
     actions = buffer_actions ++ demand_or_close_actions
-    state = %{state | pending_demand: updated_demand}
+    state = %{state | pending_demand: updated_demand, demuxer: demuxer}
 
     {{:ok, actions}, state}
   end
@@ -191,11 +190,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   defp new_state() do
-    {:ok, pid} = Agent.start_link(&TS.Demuxer.new/0)
-
     %{
       state: :waiting_pmt,
-      demuxer_agent: pid,
+      demuxer: TS.Demuxer.new(),
       pending_demand: %{},
       closed: false
     }
