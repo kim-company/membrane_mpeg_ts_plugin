@@ -24,6 +24,7 @@ defmodule Membrane.MPEG.TS.MixProject do
     [
       {:qex, "~> 0.5"},
       {:membrane_core, "~> 0.10.0"},
+      {:telemetry, "~> 1.1"},
       {:membrane_file_plugin, "~> 0.12.0", only: :test}
     ]
   end

@@ -14,7 +14,7 @@ defmodule MPEG.TS.StreamQueue do
   defstruct [:stream_id, :partials, :ready]
 
   def new(stream_id) do
-    %__MODULE__{stream_id: stream_id, partials: Qex.new(), ready: Qex.new()}
+    measure(%__MODULE__{stream_id: stream_id, partials: Qex.new(), ready: Qex.new()})
   end
 
   def push_es_packets(state = %__MODULE__{partials: partials, ready: ready}, packets) do
@@ -47,7 +47,7 @@ defmodule MPEG.TS.StreamQueue do
       |> Enum.map(&reduce_pes_packet(&1))
       |> Enum.filter(fn x -> x != nil end)
 
-    %__MODULE__{state | partials: partials, ready: Enum.into(pes_packets, ready)}
+    measure(%__MODULE__{state | partials: partials, ready: Enum.into(pes_packets, ready)})
   end
 
   def end_of_stream(state = %__MODULE__{partials: partials, ready: ready}) do
@@ -59,12 +59,12 @@ defmodule MPEG.TS.StreamQueue do
       |> Enum.filter(fn x -> x != nil end)
       |> Enum.into(ready)
 
-    %__MODULE__{state | partials: Qex.new(), ready: ready}
+    measure(%__MODULE__{state | partials: Qex.new(), ready: ready})
   end
 
   def take(state = %__MODULE__{ready: queue}, amount) do
     {items, queue} = take_from_queue(queue, amount, [])
-    {items, %__MODULE__{state | ready: queue}}
+    {items, measure(%__MODULE__{state | ready: queue})}
   end
 
   defp take_from_queue(queue, 0, items) do
@@ -115,5 +115,28 @@ defmodule MPEG.TS.StreamQueue do
         raise ArgumentError,
               "MPEG-TS could not parse Partial PES packet: #{inspect(reason)}"
     end
+  end
+
+  defp measure(queue) do
+    ready_count = Enum.count(queue.ready)
+    ready_bytes = Enum.reduce(queue.ready, 0, fn x, acc -> acc + byte_size(x.data) end)
+
+    partial_count = Enum.count(queue.partials)
+    partial_bytes = Enum.reduce(queue.partials, 0, fn x, acc -> acc + byte_size(x.payload) end)
+
+    :telemetry.execute(
+      [:mpeg_ts, :stream_queue, :probe],
+      %{
+        ready_count: ready_count,
+        partial_count: partial_count,
+        ready_bytes: ready_bytes,
+        partial_bytes: partial_bytes,
+        total_count: ready_count + partial_count,
+        total_bytes: ready_bytes + partial_bytes
+      },
+      %{label: to_string(queue.stream_id)}
+    )
+
+    queue
   end
 end
