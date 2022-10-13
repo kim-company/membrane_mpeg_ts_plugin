@@ -12,18 +12,20 @@ defmodule MPEG.TS.Demuxer do
   @type t :: %__MODULE__{
           pmt: PMT.t(),
           demuxed_queues: %{required(PMT.stream_id_t()) => StreamBuffer.t()},
+          packet_filter: (PMT.stream_id_t() -> Boolean.t()),
           buffered_bytes: binary()
         }
 
   defstruct [
     :pmt,
+    :packet_filter,
     demuxed_queues: %{},
     buffered_bytes: <<>>,
     waiting_random_access_indicator: true
   ]
 
   @spec new(Keyword.t()) :: t()
-  def new(_opts \\ []), do: %__MODULE__{}
+  def new(_opts \\ []), do: %__MODULE__{packet_filter: fn _ -> true end}
 
   def push_buffer(state, buffer) do
     {ok, bytes_to_buffer} = parse_buffer(state.buffered_bytes <> buffer)
@@ -118,9 +120,13 @@ defmodule MPEG.TS.Demuxer do
     end
   end
 
-  defp push_es_packets(state = %__MODULE__{demuxed_queues: queues}, packets) do
+  defp push_es_packets(
+         state = %__MODULE__{demuxed_queues: queues, packet_filter: filter},
+         packets
+       ) do
     queues =
       packets
+      |> Enum.filter(fn %Packet{pid: pid} -> filter.(pid) end)
       |> Enum.group_by(fn %Packet{pid: pid} -> pid end)
       |> Enum.map(fn {pid, packets} ->
         # WARNING: we're not limiting the number of streams we're tracking.

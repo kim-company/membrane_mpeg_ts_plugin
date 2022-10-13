@@ -132,7 +132,10 @@ defmodule MPEG.TS.PartialPES do
 
     if pts - dts > 60 * @ts_clock_hz do
       # https://github.com/video-dev/hls.js/blob/c14628668e04d14f0217d0118f7e768933524c6d/src/demux/tsdemuxer.ts#L1106
-      Logger.warn("#{round((pts - dts) / @ts_clock_hz)} delta between PTS and DTS. Aligning them using DTS.")
+      Logger.warn(
+        "#{round((pts - dts) / @ts_clock_hz)} delta between PTS and DTS. Aligning them using DTS."
+      )
+
       {:ok, %{pts: dts, dts: dts}, rest}
     else
       {:ok, %{pts: pts, dts: dts}, rest}

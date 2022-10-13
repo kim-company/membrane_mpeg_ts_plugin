@@ -9,11 +9,14 @@ defmodule Membrane.MPEG.TS.Demuxer do
   ```
   """
   use Membrane.Filter
-  require Membrane.Logger
+  require Logger
 
   alias MPEG.TS
 
   @h264_time_base 90_000
+  # Amount of seconds after which the demuxer will start filtering out streams
+  # that are not being followed.
+  @stream_filter_timeout 5_000
 
   def_input_pad(:input, caps: :any, demand_unit: :buffers, demand_mode: :manual)
   def_output_pad(:output, availability: :on_request, caps: :any)
@@ -81,12 +84,29 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {:ok, %{state | closed: true}}
   end
 
+  @impl true
+  def handle_other(:start_stream_filter, _ctx, state = %{pending_demand: demand, demuxer_agent: agent}) do
+    # Remove unfollowed tracks.
+    followed_stream_ids = Enum.map(demand, fn {{_, _, {:stream_id, sid}}, _} -> sid end)
+    Agent.update(agent, fn demuxer -> %TS.Demuxer{demuxer | packet_filter: fn pid ->
+      pid in followed_stream_ids
+    end} end)
+
+    Logger.warn(
+      "PES filtering enabled. Following streams #{inspect followed_stream_ids}",
+      domain: __MODULE__
+    )
+
+    {:ok, state}
+  end
+
   defp fulfill_demand(state = %{state: :waiting_pmt, demuxer_agent: pid}) do
     # Eventually I would prefer to drop the state differentiation and notify
     # the pipeline each time a different PMT table is parsed.
     pmt = Agent.get(pid, fn %TS.Demuxer{pmt: pmt} -> pmt end)
 
     if pmt != nil do
+      Process.send_after(self(), :start_stream_filter, @stream_filter_timeout)
       actions = [{:notify, {:mpeg_ts_pmt, pmt}}]
       state = %{state | state: :online}
       {{:ok, actions}, state}
