@@ -51,21 +51,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   @impl true
   def handle_demand(pad, size, :buffers, _ctx, state) do
     pending = Map.update(state.pending_demand, pad, size, fn old -> old + size end)
-    state = %{state | pending_demand: pending}
-
-    # If buffers are sent too early (e.g. by always calling fulfill_demand
-    # here), buffers will be re-ordered on the output, as if we where supplying
-    # in a moment where the pipeline is not ready to accept it. To see the
-    # behaviour, check commit 7d1389521763f05b2ebbe921f4382e791daf0a6c.
-    #
-    # On the other hand we have to fulfill demand on newly added pads here if
-    # the stream has been closed as chances are handle_process won't be called
-    # anymore as all input demand has already been processed.
-    if state.closed do
-      fulfill_demand(state)
-    else
-      {{:ok, demand: Pad.ref(:input)}, state}
-    end
+    fulfill_demand(%{state | pending_demand: pending})
   end
 
   @impl true
