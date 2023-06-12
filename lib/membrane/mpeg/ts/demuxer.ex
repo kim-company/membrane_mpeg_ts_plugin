@@ -14,18 +14,24 @@ defmodule Membrane.MPEG.TS.Demuxer do
   alias MPEG.TS
 
   @h264_time_base 90_000
+
   # Amount of seconds after which the demuxer will start filtering out streams
   # that are not being followed.
   @stream_filter_timeout 5_000
 
-  def_input_pad(:input, caps: :any, demand_unit: :buffers, demand_mode: :manual)
-  def_output_pad(:output, availability: :on_request, caps: :any)
+  def_input_pad(:input,
+    accepted_format: %Membrane.RemoteStream{},
+    demand_unit: :buffers,
+    demand_mode: :manual
+  )
+
+  def_output_pad(:output, availability: :on_request, accepted_format: %Membrane.RemoteStream{})
 
   @type state_t :: :waiting_pmt | :online
 
   @impl true
-  def handle_init(_) do
-    {:ok, new_state()}
+  def handle_init(_ctx, _opts) do
+    {[], new_state()}
   end
 
   @impl true
@@ -33,19 +39,14 @@ defmodule Membrane.MPEG.TS.Demuxer do
     # TODO: as soon as we've parse the PMT at this point, we can actually tell
     # something abount the data format (see PMT stream_type). Replace :any with
     # that information ASAP.
-    {{:ok, [{:caps, {pad, :any}}]}, state}
+    {[stream_format: {pad, %Membrane.RemoteStream{}}], state}
   end
 
   @impl true
-  def handle_prepared_to_stopped(_ctx, _state) do
-    {:ok, new_state()}
-  end
-
-  @impl true
-  def handle_prepared_to_playing(_ctx, state) do
+  def handle_playing(_ctx, state) do
     # Output pad is connected after a PMT table is recognized, hence we have to
     # ask for the first packets by ourselves.
-    {{:ok, demand: Pad.ref(:input)}, state}
+    {[demand: Pad.ref(:input)], state}
   end
 
   @impl true
@@ -64,11 +65,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
   @impl true
   def handle_end_of_stream(:input, _ctx, state) do
     demuxer = TS.Demuxer.end_of_stream(state.demuxer)
-    {:ok, %{state | closed: true, demuxer: demuxer}}
+    fulfill_demand(%{state | closed: true, demuxer: demuxer})
   end
 
   @impl true
-  def handle_other(
+  def handle_info(
         :start_stream_filter,
         _ctx,
         state = %{pending_demand: demand}
@@ -83,7 +84,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       domain: __MODULE__
     )
 
-    {:ok, %{state | demuxer: demuxer}}
+    {[], %{state | demuxer: demuxer}}
   end
 
   defp fulfill_demand(state = %{state: :waiting_pmt}) do
@@ -93,12 +94,12 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
     if pmt != nil do
       Process.send_after(self(), :start_stream_filter, @stream_filter_timeout)
-      actions = [{:notify, {:mpeg_ts_pmt, pmt}}]
+      actions = [{:notify_parent, {:mpeg_ts_pmt, pmt}}]
       state = %{state | state: :online}
-      {{:ok, actions}, state}
+      {actions, state}
     else
       actions = [{:demand, Pad.ref(:input)}]
-      {{:ok, actions}, state}
+      {actions, state}
     end
   end
 
@@ -165,7 +166,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
     actions = buffer_actions ++ demand_or_close_actions
     state = %{state | pending_demand: updated_demand, demuxer: demuxer}
 
-    {{:ok, actions}, state}
+    {actions, state}
   end
 
   defp parse_pts_or_dts(nil), do: nil

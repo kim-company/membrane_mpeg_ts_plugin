@@ -11,37 +11,21 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     alias Membrane.File
 
     @impl true
-    def handle_init(%{input_path: input_path, chunk_size: chunk_size} = options) do
-      elements = [
-        in: %File.Source{location: input_path, chunk_size: chunk_size},
-        demuxer: Membrane.MPEG.TS.Demuxer
-      ]
-
+    def handle_init(_, %{input_path: input_path, chunk_size: chunk_size} = options) do
       links = [
-        link(:in) |> to(:demuxer)
+        child(:in, %File.Source{location: input_path, chunk_size: chunk_size})
+        |> child(:demuxer, Membrane.MPEG.TS.Demuxer)
       ]
 
-      spec = %ParentSpec{
-        children: elements,
-        links: links
-      }
-
-      {{:ok, spec: spec, playback: :playing}, options}
+      {[spec: links], options}
     end
 
     @impl true
-    def handle_notification({:mpeg_ts_pmt, pmt}, _element, _context, state) do
+    def handle_child_notification({:mpeg_ts_pmt, pmt}, _element, _context, state) do
       streams =
         pmt.streams
         |> Enum.filter(fn {_, %{stream_type: type}} ->
           Enum.member?([:H264, :MPEG1_AUDIO, :AAC], type)
-        end)
-
-      elements =
-        streams
-        |> Enum.map(fn {_, %{stream_type: type}} ->
-          link_to = link_from_stream_type(type)
-          {link_to, %File.Sink{location: Map.get(state, link_to)}}
         end)
 
       links =
@@ -49,17 +33,12 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
         |> Enum.map(fn {sid, %{stream_type: type}} ->
           link_to = link_from_stream_type(type)
 
-          link(:demuxer)
+          get_child(:demuxer)
           |> via_out(Pad.ref(:output, {:stream_id, sid}))
-          |> to(link_to)
+          |> child(link_to, %File.Sink{location: Map.get(state, link_to)})
         end)
 
-      spec = %ParentSpec{
-        children: elements,
-        links: links
-      }
-
-      {{:ok, spec: spec}, state}
+      {[spec: links], state}
     end
 
     defp link_from_stream_type(:H264), do: :video_out
@@ -87,8 +66,7 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
       }
     ]
 
-    {:ok, pipeline} = Testing.Pipeline.start_link(options)
-
+    {:ok, _, pipeline} = Testing.Pipeline.start_link(options)
     assert_end_of_stream(pipeline, :video_out, :input)
     assert_end_of_stream(pipeline, :audio_out, :input)
     Testing.Pipeline.terminate(pipeline, blocking?: true)

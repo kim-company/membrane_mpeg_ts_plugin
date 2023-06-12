@@ -22,9 +22,9 @@ defmodule Membrane.MPEG.TS.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:membrane_core, "~> 0.10.0"},
+      {:membrane_core, ">= 0.11.0"},
       {:kim_mpeg_ts, github: "kim-company/kim_mpeg_ts"},
-      {:membrane_file_plugin, "~> 0.12.0", only: :test}
+      {:membrane_file_plugin, ">= 0.0.0", only: :test}
     ]
   end
 
