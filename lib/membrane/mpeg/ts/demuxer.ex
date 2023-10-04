@@ -25,7 +25,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
     demand_mode: :manual
   )
 
-  def_output_pad(:output, availability: :on_request, accepted_format: %Membrane.RemoteStream{})
+  def_output_pad(:output,
+    availability: :on_request,
+    accepted_format: %module{} when module in [Membrane.RemoteStream, Membrane.H264]
+  )
 
   @type state_t :: :waiting_pmt | :online
 
@@ -35,11 +38,14 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_pad_added(pad = {Membrane.Pad, _, {:stream_id, _sid}}, _, state) do
-    # TODO: as soon as we've parse the PMT at this point, we can actually tell
-    # something abount the data format (see PMT stream_type). Replace :any with
-    # that information ASAP.
-    {[stream_format: {pad, %Membrane.RemoteStream{}}], state}
+  def handle_pad_added(pad = {Membrane.Pad, _, {:stream_id, sid}}, _, state) do
+    format =
+      case Map.fetch!(state.demuxer.pmt.streams, sid) do
+        %{stream_type: :H264} -> %Membrane.H264{alignment: :nalu}
+        _ -> %Membrane.RemoteStream{}
+      end
+
+    {[stream_format: {pad, format}], state}
   end
 
   @impl true
@@ -79,7 +85,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
     demuxer = %TS.Demuxer{state.demuxer | packet_filter: &(&1 in followed_stream_ids)}
 
-    Logger.warn(
+    Logger.warning(
       "PES filtering enabled. Following streams #{inspect(followed_stream_ids)}",
       domain: __MODULE__
     )
