@@ -38,14 +38,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_pad_added(pad = {Membrane.Pad, _, {:stream_id, sid}}, _, state) do
-    format =
-      case Map.fetch!(state.demuxer.pmt.streams, sid) do
-        %{stream_type: :H264} -> %Membrane.H264{alignment: :nalu}
-        _ -> %Membrane.RemoteStream{}
-      end
-
-    {[stream_format: {pad, format}], state}
+  def handle_pad_added({Membrane.Pad, _, {:stream_id, sid}}, _, state) do
+    state = put_in(state, [:stream_formats, sid], nil)
+    {[], state}
   end
 
   @impl true
@@ -151,28 +146,53 @@ defmodule Membrane.MPEG.TS.Demuxer do
         Map.delete(acc, pad)
       end)
 
-    buffer_actions =
+    {buffer_actions, state} =
       buf
       |> Enum.filter(fn {_pad, packets, _} -> length(packets) > 0 end)
-      |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, packets, _} ->
-        {:buffer,
-         {pad,
-          Enum.map(packets, fn x ->
-            %Membrane.Buffer{
-              payload: x.data,
-              pts: parse_pts_or_dts(x.pts),
-              dts: parse_pts_or_dts(x.dts),
-              metadata: %{
-                stream_id: sid
-              }
-            }
-          end)}}
-      end)
+      |> Enum.flat_map_reduce(state, fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, packets, _}, state ->
+        Enum.flat_map_reduce(packets, state, fn x, state ->
+          {new_stream_format, state} = maybe_send_stream_format(state, x, sid)
 
+          stream_format_action =
+            if new_stream_format, do: [stream_format: {pad, new_stream_format}], else: []
+
+          {stream_format_action ++
+            [
+              {:buffer,
+               {pad,
+                %Membrane.Buffer{
+                  payload: x.data,
+                  pts: parse_pts_or_dts(x.pts),
+                  dts: parse_pts_or_dts(x.dts),
+                  metadata: %{
+                    stream_id: sid
+                  }
+                }}}
+            ], state}
+        end)
+      end)
     actions = buffer_actions ++ demand_or_close_actions
     state = %{state | pending_demand: updated_demand, demuxer: demuxer}
 
     {actions, state}
+  end
+
+  defp maybe_send_stream_format(state, packet, sid) do
+    stream_format_for_packet = get_stream_format_for_packet(state, packet, sid)
+
+    if state.stream_formats[sid] != stream_format_for_packet do
+      state = put_in(state, [:stream_formats, sid], stream_format_for_packet)
+      {stream_format_for_packet, state}
+    else
+      {nil, state}
+    end
+  end
+
+  defp get_stream_format_for_packet(state, packet, sid) do
+      case {Map.fetch!(state.demuxer.pmt.streams, sid), packet.aligned?} do
+        {%{stream_type: :H264}, true} -> %Membrane.H264{alignment: :au}
+        _ -> %Membrane.RemoteStream{}
+      end
   end
 
   defp parse_pts_or_dts(nil), do: nil
@@ -187,7 +207,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
       state: :waiting_pmt,
       demuxer: TS.Demuxer.new(),
       pending_demand: %{},
-      closed: false
+      closed: false,
+      stream_formats: %{}
     }
   end
 end
