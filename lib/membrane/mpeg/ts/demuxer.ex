@@ -27,7 +27,18 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   def_output_pad(:output,
     availability: :on_request,
-    accepted_format: %module{} when module in [Membrane.RemoteStream, Membrane.H264]
+    accepted_format: %module{} when module in [Membrane.RemoteStream, Membrane.H264],
+    options: [aligned?: [
+      spec: boolean(),
+      default: true,
+      description: """
+      Determines if the output sent from this pad is aligned.
+      If set to true, it will be assumed that each PES packet sent from
+      this pad contains a complete stream unit (e.g. complete Access Unit in
+      case of H264 stream).
+      Otherwise, no such an assumption will be made.
+      This option affects the stream format sent through this pad.
+      """]]
   )
 
   @type state_t :: :waiting_pmt | :online
@@ -38,9 +49,15 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_pad_added({Membrane.Pad, _, {:stream_id, sid}}, _, state) do
-    state = put_in(state, [:stream_formats, sid], nil)
-    {[], state}
+  def handle_pad_added(pad = {Membrane.Pad, _, {:stream_id, sid}}, ctx, state) do
+    aligned? = ctx.options[:aligned?]
+    format =
+      cond do
+        Map.fetch!(state.demuxer.pmt.streams, sid)[:stream_type] == :H264  and aligned? -> %Membrane.H264{alignment: :au}
+        true -> %Membrane.RemoteStream{}
+      end
+    state = put_in(state, [:pads_alignments, sid], aligned?)
+    {[stream_format: {pad, format}], state}
   end
 
   @impl true
@@ -146,53 +163,35 @@ defmodule Membrane.MPEG.TS.Demuxer do
         Map.delete(acc, pad)
       end)
 
-    {buffer_actions, state} =
+    buffer_actions =
       buf
       |> Enum.filter(fn {_pad, packets, _} -> length(packets) > 0 end)
-      |> Enum.flat_map_reduce(state, fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, packets, _}, state ->
-        Enum.flat_map_reduce(packets, state, fn x, state ->
-          {new_stream_format, state} = maybe_send_stream_format(state, x, sid)
-
-          stream_format_action =
-            if new_stream_format, do: [stream_format: {pad, new_stream_format}], else: []
-
-          {stream_format_action ++
-            [
-              {:buffer,
-               {pad,
-                %Membrane.Buffer{
-                  payload: x.data,
-                  pts: parse_pts_or_dts(x.pts),
-                  dts: parse_pts_or_dts(x.dts),
-                  metadata: %{
-                    stream_id: sid
-                  }
-                }}}
-            ], state}
-        end)
+      |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, packets, _} ->
+        {:buffer,
+         {pad,
+          Enum.map(packets, fn x ->
+            if state.pads_alignments[sid]  and not x.aligned? do
+              Logger.warning("""
+              You have specified that the stream for pad #{inspect(pad)} is aligned,
+              but the PES packets have `alignment_indicator` value meaning that they are not aligned.
+              Consider setting `aligned?: false` output pad option.
+              """)
+            end
+            %Membrane.Buffer{
+              payload: x.data,
+              pts: parse_pts_or_dts(x.pts),
+              dts: parse_pts_or_dts(x.dts),
+              metadata: %{
+                stream_id: sid
+              }
+            }
+          end)}}
       end)
+
     actions = buffer_actions ++ demand_or_close_actions
     state = %{state | pending_demand: updated_demand, demuxer: demuxer}
 
     {actions, state}
-  end
-
-  defp maybe_send_stream_format(state, packet, sid) do
-    stream_format_for_packet = get_stream_format_for_packet(state, packet, sid)
-
-    if state.stream_formats[sid] != stream_format_for_packet do
-      state = put_in(state, [:stream_formats, sid], stream_format_for_packet)
-      {stream_format_for_packet, state}
-    else
-      {nil, state}
-    end
-  end
-
-  defp get_stream_format_for_packet(state, packet, sid) do
-      case {Map.fetch!(state.demuxer.pmt.streams, sid), packet.aligned?} do
-        {%{stream_type: :H264}, true} -> %Membrane.H264{alignment: :au}
-        _ -> %Membrane.RemoteStream{}
-      end
   end
 
   defp parse_pts_or_dts(nil), do: nil
@@ -208,7 +207,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       demuxer: TS.Demuxer.new(),
       pending_demand: %{},
       closed: false,
-      stream_formats: %{}
+      pads_alignments: %{}
     }
   end
 end
