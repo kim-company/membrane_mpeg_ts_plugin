@@ -28,17 +28,20 @@ defmodule Membrane.MPEG.TS.Demuxer do
   def_output_pad(:output,
     availability: :on_request,
     accepted_format: %module{} when module in [Membrane.RemoteStream, Membrane.H264],
-    options: [aligned?: [
-      spec: boolean(),
-      default: true,
-      description: """
-      Determines if the output sent from this pad is aligned.
-      If set to true, it will be assumed that each PES packet sent from
-      this pad contains a complete stream unit (e.g. complete Access Unit in
-      case of H264 stream).
-      Otherwise, no such an assumption will be made.
-      This option affects the stream format sent through this pad.
-      """]]
+    options: [
+      is_aligned: [
+        spec: boolean(),
+        default: true,
+        description: """
+        Determines if the output sent from this pad is aligned.
+        If set to true, it will be assumed that each PES packet sent from
+        this pad contains a complete stream unit (e.g. complete Access Unit in
+        case of H264 stream).
+        Otherwise, no such an assumption will be made.
+        This option affects the stream format sent through this pad.
+        """
+      ]
+    ]
   )
 
   @type state_t :: :waiting_pmt | :online
@@ -50,13 +53,18 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   @impl true
   def handle_pad_added(pad = {Membrane.Pad, _, {:stream_id, sid}}, ctx, state) do
-    aligned? = ctx.options[:aligned?]
+    is_aligned = ctx.options[:is_aligned]
+
     format =
       cond do
-        Map.fetch!(state.demuxer.pmt.streams, sid)[:stream_type] == :H264  and aligned? -> %Membrane.H264{alignment: :au}
-        true -> %Membrane.RemoteStream{}
+        Map.fetch!(state.demuxer.pmt.streams, sid)[:stream_type] == :H264 and is_aligned ->
+          %Membrane.H264{alignment: :au}
+
+        true ->
+          %Membrane.RemoteStream{}
       end
-    state = put_in(state, [:pads_alignments, sid], aligned?)
+
+    state = put_in(state, [:pads_alignments, sid], is_aligned)
     {[stream_format: {pad, format}], state}
   end
 
@@ -170,13 +178,14 @@ defmodule Membrane.MPEG.TS.Demuxer do
         {:buffer,
          {pad,
           Enum.map(packets, fn x ->
-            if state.pads_alignments[sid]  and not x.aligned? do
+            if state.pads_alignments[sid] and not x.is_aligned do
               Logger.warning("""
               You have specified that the stream for pad #{inspect(pad)} is aligned,
               but the PES packets have `alignment_indicator` value meaning that they are not aligned.
-              Consider setting `aligned?: false` output pad option.
+              Consider setting `is_aligned: false` output pad option.
               """)
             end
+
             %Membrane.Buffer{
               payload: x.data,
               pts: parse_pts_or_dts(x.pts),
