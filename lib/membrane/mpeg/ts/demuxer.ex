@@ -219,7 +219,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
               {[stream_format: {pad, get_format(pad, state, true)}],
                %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, true)}}
 
-            next_buffer.metadata.is_aligned == false and (state.is_last_aligned[pad] || false) ->
+            next_buffer.metadata.is_aligned == false and
+                (state.is_last_aligned[pad] == true or state.is_last_aligned[pad] == nil) ->
               {[stream_format: {pad, get_format(pad, state, false)}],
                %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, false)}}
 
