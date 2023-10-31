@@ -27,21 +27,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   def_output_pad(:output,
     availability: :on_request,
-    accepted_format: %module{} when module in [Membrane.RemoteStream, Membrane.H264],
-    options: [
-      is_aligned: [
-        spec: boolean(),
-        default: true,
-        description: """
-        Determines if the output sent from this pad is aligned.
-        If set to true, it will be assumed that each PES packet sent from
-        this pad contains a complete stream unit (e.g. complete Access Unit in
-        case of H264 stream).
-        Otherwise, no such an assumption will be made.
-        This option affects the stream format sent through this pad.
-        """
-      ]
-    ]
+    accepted_format: %module{} when module in [Membrane.RemoteStream, Membrane.H264]
   )
 
   @type state_t :: :waiting_pmt | :online
@@ -52,20 +38,13 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_pad_added(pad = {Membrane.Pad, _, {:stream_id, sid}}, ctx, state) do
-    is_aligned = ctx.options[:is_aligned]
-
-    format =
-      cond do
-        Map.fetch!(state.demuxer.pmt.streams, sid)[:stream_type] == :H264 and is_aligned ->
-          %Membrane.H264{alignment: :au}
-
-        true ->
-          %Membrane.RemoteStream{}
-      end
-
-    state = put_in(state, [:pads_alignments, sid], is_aligned)
-    {[stream_format: {pad, format}], state}
+  def handle_pad_added(pad, _ctx, state) do
+    {[],
+     %{
+       state
+       | is_last_aligned: Map.put(state.is_last_aligned, pad, nil),
+         unsent_buffer_actions: Map.put(state.unsent_buffer_actions, pad, [])
+     }}
   end
 
   @impl true
@@ -178,24 +157,19 @@ defmodule Membrane.MPEG.TS.Demuxer do
         {:buffer,
          {pad,
           Enum.map(packets, fn x ->
-            if state.pads_alignments[sid] and not x.is_aligned do
-              Logger.warning("""
-              You have specified that the stream for pad #{inspect(pad)} is aligned,
-              but the PES packets have `alignment_indicator` value meaning that they are not aligned.
-              Consider setting `is_aligned: false` output pad option.
-              """)
-            end
-
             %Membrane.Buffer{
               payload: x.data,
               pts: parse_pts_or_dts(x.pts),
               dts: parse_pts_or_dts(x.dts),
               metadata: %{
-                stream_id: sid
+                stream_id: sid,
+                is_aligned: x.is_aligned
               }
             }
           end)}}
       end)
+
+    {buffer_actions, state} = maybe_update_stream_format(buffer_actions, state)
 
     actions = buffer_actions ++ demand_or_close_actions
     state = %{state | pending_demand: updated_demand, demuxer: demuxer}
@@ -203,6 +177,68 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {actions, state}
   end
 
+  defp maybe_update_stream_format(buffer_actions, state) do
+    flat_buffer_actions_per_pad =
+      Enum.flat_map(buffer_actions, fn
+        {:buffer, {pad, buffers}} when is_list(buffers) ->
+          Enum.map(buffers, &{:buffer, {pad, &1}})
+
+        {:buffer, {pad, buffer}} ->
+          [buffer: {pad, buffer}]
+      end)
+      |> Enum.chunk_by(fn {:buffer, {pad, _buffer}} -> pad end)
+
+    Enum.flat_map_reduce(flat_buffer_actions_per_pad, state, fn flat_buffer_actions, state ->
+      [{:buffer, {pad, _buffer}} | _rest] = flat_buffer_actions
+      actions = state.unsent_buffer_actions[pad] ++ flat_buffer_actions
+      shifted_actions = Enum.slice(actions, 1..-1) ++ [nil]
+
+      Enum.zip(actions, shifted_actions)
+      |> Enum.flat_map_reduce(state, fn
+        {this_action, nil}, state ->
+          {[],
+           %{
+             state
+             | unsent_buffer_actions: Map.put(state.unsent_buffer_actions, pad, [this_action])
+           }}
+
+        {this_action, next_action}, state ->
+          {:buffer, {^pad, this_buffer}} = this_action
+          {:buffer, {^pad, next_buffer}} = next_action
+
+          {stream_format_actions, state} =
+            cond do
+              this_buffer.metadata.is_aligned and next_buffer.metadata.is_aligned and
+                  not (state.is_last_aligned[pad] || false) ->
+                {[stream_format: {pad, get_format(pad, state, true)}],
+                 %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, true)}}
+
+              next_buffer.metadata.is_aligned == false and (state.is_last_aligned[pad] || false) ->
+                {[stream_format: {pad, get_format(pad, state, false)}],
+                 %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, false)}}
+
+              true ->
+                {[], state}
+            end
+
+          {stream_format_actions ++ [this_action], state}
+      end)
+    end)
+  end
+
+  defp get_format(pad, state, is_aligned) do
+    {_, _, {:stream_id, sid}} = pad
+
+    cond do
+      Map.fetch!(state.demuxer.pmt.streams, sid)[:stream_type] == :H264 and is_aligned ->
+        %Membrane.H264{alignment: :au}
+
+      true ->
+        %Membrane.RemoteStream{}
+    end
+  end
+
+  # aligned aligned non_aligned
   defp parse_pts_or_dts(nil), do: nil
 
   defp parse_pts_or_dts(ts) do
@@ -216,7 +252,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
       demuxer: TS.Demuxer.new(),
       pending_demand: %{},
       closed: false,
-      pads_alignments: %{}
+      unsent_buffer_actions: %{},
+      is_last_aligned: %{}
     }
   end
 end
