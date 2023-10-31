@@ -178,7 +178,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   defp maybe_update_stream_format(buffer_actions, state) do
-    flat_buffer_actions_per_pad =
+    flat_buffer_actions_for_all_pads =
       Enum.flat_map(buffer_actions, fn
         {:buffer, {pad, buffers}} when is_list(buffers) ->
           Enum.map(buffers, &{:buffer, {pad, &1}})
@@ -188,41 +188,46 @@ defmodule Membrane.MPEG.TS.Demuxer do
       end)
       |> Enum.chunk_by(fn {:buffer, {pad, _buffer}} -> pad end)
 
-    Enum.flat_map_reduce(flat_buffer_actions_per_pad, state, fn flat_buffer_actions, state ->
-      [{:buffer, {pad, _buffer}} | _rest] = flat_buffer_actions
-      actions = state.unsent_buffer_actions[pad] ++ flat_buffer_actions
-      shifted_actions = Enum.slice(actions, 1..-1) ++ [nil]
+    Enum.flat_map_reduce(flat_buffer_actions_for_all_pads, state, fn flat_buffer_actions_per_pad,
+                                                                     state ->
+      [{:buffer, {pad, _buffer}} | _rest] = flat_buffer_actions_per_pad
+      maybe_update_stream_format_per_pad(pad, state, flat_buffer_actions_per_pad)
+    end)
+  end
 
-      Enum.zip(actions, shifted_actions)
-      |> Enum.flat_map_reduce(state, fn
-        {this_action, nil}, state ->
-          {[],
-           %{
-             state
-             | unsent_buffer_actions: Map.put(state.unsent_buffer_actions, pad, [this_action])
-           }}
+  defp maybe_update_stream_format_per_pad(pad, state, actions) do
+    all_actions = state.unsent_buffer_actions[pad] ++ actions
+    shifted_actions = Enum.slice(all_actions, 1..-1) ++ [nil]
 
-        {this_action, next_action}, state ->
-          {:buffer, {^pad, this_buffer}} = this_action
-          {:buffer, {^pad, next_buffer}} = next_action
+    Enum.zip(all_actions, shifted_actions)
+    |> Enum.flat_map_reduce(state, fn
+      {this_action, nil}, state ->
+        {[],
+         %{
+           state
+           | unsent_buffer_actions: Map.put(state.unsent_buffer_actions, pad, [this_action])
+         }}
 
-          {stream_format_actions, state} =
-            cond do
-              this_buffer.metadata.is_aligned and next_buffer.metadata.is_aligned and
-                  not (state.is_last_aligned[pad] || false) ->
-                {[stream_format: {pad, get_format(pad, state, true)}],
-                 %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, true)}}
+      {this_action, next_action}, state ->
+        {:buffer, {^pad, this_buffer}} = this_action
+        {:buffer, {^pad, next_buffer}} = next_action
 
-              next_buffer.metadata.is_aligned == false and (state.is_last_aligned[pad] || false) ->
-                {[stream_format: {pad, get_format(pad, state, false)}],
-                 %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, false)}}
+        {stream_format_actions, state} =
+          cond do
+            this_buffer.metadata.is_aligned and next_buffer.metadata.is_aligned and
+                not (state.is_last_aligned[pad] || false) ->
+              {[stream_format: {pad, get_format(pad, state, true)}],
+               %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, true)}}
 
-              true ->
-                {[], state}
-            end
+            next_buffer.metadata.is_aligned == false and (state.is_last_aligned[pad] || false) ->
+              {[stream_format: {pad, get_format(pad, state, false)}],
+               %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, false)}}
 
-          {stream_format_actions ++ [this_action], state}
-      end)
+            true ->
+              {[], state}
+          end
+
+        {stream_format_actions ++ [this_action], state}
     end)
   end
 
@@ -238,7 +243,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
     end
   end
 
-  # aligned aligned non_aligned
   defp parse_pts_or_dts(nil), do: nil
 
   defp parse_pts_or_dts(ts) do
