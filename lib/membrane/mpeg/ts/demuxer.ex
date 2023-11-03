@@ -38,14 +38,13 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_pad_added(pad = {Membrane.Pad, _, {:stream_id, sid}}, _, state) do
-    format =
-      case Map.fetch!(state.demuxer.pmt.streams, sid) do
-        %{stream_type: :H264} -> %Membrane.H264{alignment: :nalu}
-        _ -> %Membrane.RemoteStream{}
-      end
-
-    {[stream_format: {pad, format}], state}
+  def handle_pad_added(pad, _ctx, state) do
+    {[],
+     %{
+       state
+       | is_last_aligned: Map.put(state.is_last_aligned, pad, nil),
+         unsent_buffer_actions: Map.put(state.unsent_buffer_actions, pad, [])
+     }}
   end
 
   @impl true
@@ -163,16 +162,86 @@ defmodule Membrane.MPEG.TS.Demuxer do
               pts: parse_pts_or_dts(x.pts),
               dts: parse_pts_or_dts(x.dts),
               metadata: %{
-                stream_id: sid
+                stream_id: sid,
+                is_aligned: x.is_aligned
               }
             }
           end)}}
       end)
 
+    {buffer_actions, state} = maybe_update_stream_format(buffer_actions, state)
+
     actions = buffer_actions ++ demand_or_close_actions
     state = %{state | pending_demand: updated_demand, demuxer: demuxer}
 
     {actions, state}
+  end
+
+  defp maybe_update_stream_format(buffer_actions, state) do
+    flat_buffer_actions_for_all_pads =
+      Enum.flat_map(buffer_actions, fn
+        {:buffer, {pad, buffers}} when is_list(buffers) ->
+          Enum.map(buffers, &{:buffer, {pad, &1}})
+
+        {:buffer, {pad, buffer}} ->
+          [buffer: {pad, buffer}]
+      end)
+      |> Enum.chunk_by(fn {:buffer, {pad, _buffer}} -> pad end)
+
+    Enum.flat_map_reduce(flat_buffer_actions_for_all_pads, state, fn flat_buffer_actions_per_pad,
+                                                                     state ->
+      [{:buffer, {pad, _buffer}} | _rest] = flat_buffer_actions_per_pad
+      maybe_update_stream_format_per_pad(pad, state, flat_buffer_actions_per_pad)
+    end)
+  end
+
+  defp maybe_update_stream_format_per_pad(pad, state, actions) do
+    all_actions = state.unsent_buffer_actions[pad] ++ actions
+    shifted_actions = Enum.slice(all_actions, 1..-1) ++ [nil]
+
+    Enum.zip(all_actions, shifted_actions)
+    |> Enum.flat_map_reduce(state, fn
+      {this_action, nil}, state ->
+        {[],
+         %{
+           state
+           | unsent_buffer_actions: Map.put(state.unsent_buffer_actions, pad, [this_action])
+         }}
+
+      {this_action, next_action}, state ->
+        {:buffer, {^pad, this_buffer}} = this_action
+        {:buffer, {^pad, next_buffer}} = next_action
+
+        {stream_format_actions, state} =
+          cond do
+            this_buffer.metadata.is_aligned and next_buffer.metadata.is_aligned and
+                not (state.is_last_aligned[pad] || false) ->
+              {[stream_format: {pad, get_format(pad, state, true)}],
+               %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, true)}}
+
+            next_buffer.metadata.is_aligned == false and
+                (state.is_last_aligned[pad] == true or state.is_last_aligned[pad] == nil) ->
+              {[stream_format: {pad, get_format(pad, state, false)}],
+               %{state | is_last_aligned: Map.put(state.is_last_aligned, pad, false)}}
+
+            true ->
+              {[], state}
+          end
+
+        {stream_format_actions ++ [this_action], state}
+    end)
+  end
+
+  defp get_format(pad, state, is_aligned) do
+    {_, _, {:stream_id, sid}} = pad
+
+    cond do
+      Map.fetch!(state.demuxer.pmt.streams, sid)[:stream_type] == :H264 and is_aligned ->
+        %Membrane.H264{alignment: :au}
+
+      true ->
+        %Membrane.RemoteStream{}
+    end
   end
 
   defp parse_pts_or_dts(nil), do: nil
@@ -187,7 +256,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
       state: :waiting_pmt,
       demuxer: TS.Demuxer.new(),
       pending_demand: %{},
-      closed: false
+      closed: false,
+      unsent_buffer_actions: %{},
+      is_last_aligned: %{}
     }
   end
 end
