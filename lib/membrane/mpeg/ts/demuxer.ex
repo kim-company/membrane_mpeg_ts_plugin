@@ -43,9 +43,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
      %{
        state
        | is_last_aligned: Map.put(state.is_last_aligned, pad, nil),
-         unsent_buffer_actions: Map.put(state.unsent_buffer_actions, pad, []),
-         last_chunk_id_per_pad: Map.put(state.last_chunk_id_per_pad, pad, nil),
-         first_chunk_ts_per_pad: Map.put(state.first_chunk_ts_per_pad, pad, nil)
+         unsent_buffer_actions_per_pad: Map.put(state.unsent_buffer_actions_per_pad, pad, [])
      }}
   end
 
@@ -63,7 +61,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   @impl true
   def handle_process(:input, buffer, ctx, state) do
-    state = %{state | chunk_id: state.chunk_id + 1}
     process_buffer(buffer, state, Map.keys(ctx.pads))
   end
 
@@ -85,8 +82,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_event(:input, %Membrane.Event.Discontinuity{} = discontinuity, _ctx, state) do
-    {[], %{state | discontinuty_duration: discontinuity.duration}}
+  def handle_event(:input, %Membrane.Event.Discontinuity{} = _discontinuity, _ctx, state) do
+    {[], state}
   end
 
   @impl true
@@ -128,7 +125,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       update_in(
         state,
         [:demuxer],
-        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata.from, state.chunk_id)
+        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata.discontinuity)
       )
 
     pmt = state.demuxer.pmt
@@ -149,7 +146,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       update_in(
         state,
         [:demuxer],
-        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata.from, state.chunk_id)
+        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata.discontinuity)
       )
 
     # Fetch packet buffers for each pad.
@@ -167,59 +164,38 @@ defmodule Membrane.MPEG.TS.Demuxer do
         {{pad, packets}, demuxer}
       end)
 
-    {buffer_actions, state} =
+    buffer_actions =
       buf
       |> Enum.filter(fn {_pad, packets} -> length(packets) > 0 end)
-      |> Enum.map_reduce(state, fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, packets}, state ->
-        IO.inspect("NEW PAD")
-
-        {buffers, {last_chunk_id, first_chunk_ts}} =
-          Enum.map_reduce(
+      |> Enum.map(fn {pad = {Membrane.Pad, _, {:stream_id, sid}}, packets} ->
+        buffers =
+          Enum.map(
             packets,
-            {state.last_chunk_id_per_pad[pad], state.first_chunk_ts_per_pad[pad]},
-            fn x, {last_chunk_id, first_chunk_ts} ->
-              {last_chunk_id, first_chunk_ts} =
-                if last_chunk_id != x.chunk_id do
-                  first_chunk_ts = (x.dts || x.pts) * Membrane.Time.second() / @h264_time_base
-                  {x.chunk_id, first_chunk_ts}
-                else
-                  {last_chunk_id, first_chunk_ts}
-                end
-
+            fn x ->
               pts =
-                parse_pts_or_dts(x.pts, first_chunk_ts, Membrane.Time.seconds(Ratio.new(x.from)))
+                parse_pts_or_dts(x.pts)
 
               dts =
-                parse_pts_or_dts(x.dts, first_chunk_ts, Membrane.Time.seconds(Ratio.new(x.from)))
+                parse_pts_or_dts(x.dts)
 
-              IO.inspect({dts, x.from, first_chunk_ts, x.chunk_id}, label: :dts)
-              # IO.inspect(x.from, label: :from123)
-              # IO.inspect(x.chunk_id, label: :chunk_id123)
-              # IO.inspect(first_chunk_ts, label: :first_chunk_ts123)
-
-              {%Membrane.Buffer{
-                 payload: x.data,
-                 pts: pts,
-                 dts: dts,
-                 metadata: %{
-                   stream_id: sid,
-                   is_aligned: x.is_aligned
-                 }
-               }, {last_chunk_id, first_chunk_ts}}
+              %Membrane.Buffer{
+                payload: x.data,
+                pts: pts,
+                dts: dts,
+                metadata: %{
+                  stream_id: sid,
+                  is_aligned: x.is_aligned,
+                  discontinuity: x.discontinuity
+                }
+              }
             end
           )
 
-        state = %{
-          state
-          | last_chunk_id_per_pad: Map.put(state.last_chunk_id_per_pad, pad, last_chunk_id),
-            first_chunk_ts_per_pad: Map.put(state.first_chunk_ts_per_pad, pad, first_chunk_ts)
-        }
-
-        {{:buffer, {pad, buffers}}, state}
+        {:buffer, {pad, buffers}}
       end)
 
-    {buffer_actions, state} = maybe_update_stream_format(buffer_actions, state)
-    state = %{state | demuxer: demuxer, discontinuity_duration: nil}
+    {actions_with_events, state} = update_actions_with_events(buffer_actions, state)
+    state = %{state | demuxer: demuxer}
 
     redemand_actions =
       pads
@@ -229,10 +205,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
       end)
       |> Enum.map(fn pad -> {:redemand, pad} end)
 
-    {buffer_actions ++ redemand_actions, state}
+    {actions_with_events ++ redemand_actions, state}
   end
 
-  defp maybe_update_stream_format(buffer_actions, state) do
+  defp update_actions_with_events(buffer_actions, state) do
     flat_buffer_actions_for_all_pads =
       Enum.flat_map(buffer_actions, fn
         {:buffer, {pad, buffers}} when is_list(buffers) ->
@@ -246,12 +222,16 @@ defmodule Membrane.MPEG.TS.Demuxer do
     Enum.flat_map_reduce(flat_buffer_actions_for_all_pads, state, fn flat_buffer_actions_per_pad,
                                                                      state ->
       [{:buffer, {pad, _buffer}} | _rest] = flat_buffer_actions_per_pad
-      maybe_update_stream_format_per_pad(pad, state, flat_buffer_actions_per_pad)
+
+      {actions, state} =
+        maybe_update_stream_format_per_pad(pad, state, flat_buffer_actions_per_pad)
+
+      maybe_send_discontinuity_per_pad(pad, state, actions)
     end)
   end
 
   defp maybe_update_stream_format_per_pad(pad, state, actions) do
-    all_actions = state.unsent_buffer_actions[pad] ++ actions
+    all_actions = state.unsent_buffer_actions_per_pad[pad] ++ actions
     shifted_actions = Enum.slice(all_actions, 1..-1) ++ [nil]
 
     Enum.zip(all_actions, shifted_actions)
@@ -260,7 +240,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
         {[],
          %{
            state
-           | unsent_buffer_actions: Map.put(state.unsent_buffer_actions, pad, [this_action])
+           | unsent_buffer_actions_per_pad:
+               Map.put(state.unsent_buffer_actions_per_pad, pad, [this_action])
          }}
 
       {this_action, next_action}, state ->
@@ -287,6 +268,32 @@ defmodule Membrane.MPEG.TS.Demuxer do
     end)
   end
 
+  defp maybe_send_discontinuity_per_pad(pad, state, actions) do
+    Enum.flat_map_reduce(actions, state, fn action, state ->
+      case action do
+        {:buffer, {^pad, buffer}} = action ->
+          actions =
+            if buffer.metadata.discontinuity and
+                 (state.discontinuity_per_pad[pad] || false) == false do
+              [event: {pad, %Membrane.Event.Discontinuity{}}] ++ [action]
+            else
+              [action]
+            end
+
+          state = %{
+            state
+            | discontinuity_per_pad:
+                Map.put(state.discontinuity_per_pad, pad, buffer.metadata.discontinuity)
+          }
+
+          {actions, state}
+
+        other_action ->
+          {[other_action], state}
+      end
+    end)
+  end
+
   defp get_format(pad, state, is_aligned) do
     {_, _, {:stream_id, sid}} = pad
 
@@ -299,12 +306,12 @@ defmodule Membrane.MPEG.TS.Demuxer do
     end
   end
 
-  defp parse_pts_or_dts(nil, _initial_offset, _offset), do: nil
+  defp parse_pts_or_dts(nil), do: nil
 
-  defp parse_pts_or_dts(ts, initial_offset, offset) do
+  defp parse_pts_or_dts(ts) do
     use Ratio
 
-    (ts * Membrane.Time.second() / @h264_time_base - initial_offset + (offset || 0))
+    (ts * Membrane.Time.second() / @h264_time_base)
     |> Ratio.trunc()
   end
 
@@ -314,12 +321,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
       demuxer: TS.Demuxer.new(),
       pending_demand: %{},
       closed: false,
-      unsent_buffer_actions: %{},
+      unsent_buffer_actions_per_pad: %{},
       is_last_aligned: %{},
-      discontinuity_duration: nil,
-      chunk_id: 0,
-      last_chunk_id_per_pad: %{},
-      first_chunk_ts_per_pad: %{}
+      discontinuity_per_pad: %{}
     }
   end
 end
