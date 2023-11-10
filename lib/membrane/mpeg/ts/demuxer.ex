@@ -151,8 +151,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
     # Fetch packet buffers for each pad.
     {buf, demuxer} =
-      pads
-      |> Enum.filter(fn
+      Enum.filter(pads, fn
         {Membrane.Pad, :output, _id} -> true
         _other -> false
       end)
