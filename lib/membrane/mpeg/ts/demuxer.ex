@@ -94,7 +94,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
       ) do
     # Remove unfollowed tracks.
     followed_stream_ids =
-      Enum.filter(ctx.pads, fn
+      Map.keys(ctx.pads)
+      |> Enum.filter(fn
         {Membrane.Pad, :output, _id} -> true
         _other -> false
       end)
