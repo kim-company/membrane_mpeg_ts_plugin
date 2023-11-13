@@ -93,7 +93,12 @@ defmodule Membrane.MPEG.TS.Demuxer do
         state
       ) do
     # Remove unfollowed tracks.
-    followed_stream_ids = Enum.map(ctx.pads, fn {_, _, {:stream_id, sid}} -> sid end)
+    followed_stream_ids =
+      Enum.filter(ctx.pads, fn
+        {Membrane.Pad, :output, _id} -> true
+        _other -> false
+      end)
+      |> Enum.map(fn {_, _, {:stream_id, sid}} -> sid end)
 
     demuxer = %TS.Demuxer{state.demuxer | packet_filter: &(&1 in followed_stream_ids)}
 
