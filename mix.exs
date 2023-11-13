@@ -25,7 +25,8 @@ defmodule Membrane.MPEG.TS.MixProject do
       {:membrane_core, ">= 0.11.0"},
       {:membrane_h264_format, "~> 0.6.1"},
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
-      {:kim_mpeg_ts, github: "kim-company/kim_mpeg_ts"}
+      {:kim_mpeg_ts,
+       github: "membraneframework-labs/kim_mpeg_ts", branch: "adjust_for_handling_discontinuity"}
     ]
   end
 

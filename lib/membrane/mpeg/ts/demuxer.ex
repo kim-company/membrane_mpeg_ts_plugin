@@ -82,11 +82,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_event(:input, %Membrane.Event.Discontinuity{} = _discontinuity, _ctx, state) do
-    {[], state}
-  end
-
-  @impl true
   def handle_event(:input, event, _ctx, state) do
     {[forward: event], state}
   end
@@ -95,10 +90,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
   def handle_info(
         :start_stream_filter,
         ctx,
-        state = %{pending_demand: demand}
+        state
       ) do
     # Remove unfollowed tracks.
-    followed_stream_ids = Enum.map(demand, fn {{_, _, {:stream_id, sid}}, _} -> sid end)
+    followed_stream_ids = Enum.map(ctx.pads, fn {_, _, {:stream_id, sid}} -> sid end)
 
     demuxer = %TS.Demuxer{state.demuxer | packet_filter: &(&1 in followed_stream_ids)}
 
@@ -125,7 +120,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       update_in(
         state,
         [:demuxer],
-        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata.discontinuity)
+        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata[:discontinuity] || false)
       )
 
     pmt = state.demuxer.pmt
@@ -146,7 +141,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       update_in(
         state,
         [:demuxer],
-        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata.discontinuity)
+        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata[:discontinuity] || false)
       )
 
     # Fetch packet buffers for each pad.
