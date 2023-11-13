@@ -120,7 +120,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
       update_in(
         state,
         [:demuxer],
-        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata[:discontinuity] || false)
+        &TS.Demuxer.push_buffer(
+          &1,
+          buffer.payload,
+          Map.get(buffer.metadata, :discontinuity) || false
+        )
       )
 
     pmt = state.demuxer.pmt
@@ -141,7 +145,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
       update_in(
         state,
         [:demuxer],
-        &TS.Demuxer.push_buffer(&1, buffer.payload, buffer.metadata[:discontinuity] || false)
+        &TS.Demuxer.push_buffer(
+          &1,
+          buffer.payload,
+          Map.get(buffer.metadata, :discontinuity) || false
+        )
       )
 
     # Fetch packet buffers for each pad.
