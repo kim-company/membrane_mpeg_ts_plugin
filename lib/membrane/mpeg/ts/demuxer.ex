@@ -78,7 +78,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
       |> Enum.map(fn pad_name -> {:end_of_stream, pad_name} end)
 
     {actions, state}
-    # TODO - eos can be handled not simuntaniously for all pads
   end
 
   @impl true
@@ -327,7 +326,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
     %{
       state: :waiting_pmt,
       demuxer: TS.Demuxer.new(),
-      pending_demand: %{},
       closed: false,
       unsent_buffer_actions_per_pad: %{},
       is_last_aligned: %{},
