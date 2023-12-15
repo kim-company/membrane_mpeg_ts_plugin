@@ -22,15 +22,16 @@ defmodule Membrane.MPEG.TS.Demuxer do
   def_input_pad(:input,
     accepted_format: %Membrane.RemoteStream{},
     demand_unit: :buffers,
-    demand_mode: :manual
+    flow_control: :manual
   )
 
   def_output_pad(:output,
     availability: :on_request,
-    accepted_format: %module{} when module in [Membrane.RemoteStream, Membrane.H264]
+    accepted_format: %module{} when module in [Membrane.RemoteStream, Membrane.H264],
+    flow_control: :manual
   )
 
-  @type state_t :: :waiting_pmt | :online
+  @type state_t :: :waiting_pmt | :waiting_for_pads | :online
 
   @impl true
   def handle_init(_ctx, _opts) do
@@ -38,13 +39,29 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_pad_added(pad, _ctx, state) do
-    {[],
-     %{
-       state
-       | is_last_aligned: Map.put(state.is_last_aligned, pad, nil),
-         unsent_buffer_actions_per_pad: Map.put(state.unsent_buffer_actions_per_pad, pad, [])
-     }}
+  def handle_pad_added(pad, ctx, state) do
+    new_fsm_state =
+      if state.state == :waiting_for_pads and
+           Map.keys(state.demuxer.pmt.streams)
+           |> Enum.map(&{Membrane.Pad, :output, {:stream_id, &1}})
+           |> Enum.all?(&(&1 in Map.keys(ctx.pads))) do
+        :online
+      else
+        state.state
+      end
+
+    state = %{
+      state
+      | is_last_aligned: Map.put(state.is_last_aligned, pad, nil),
+        unsent_buffer_actions_per_pad: Map.put(state.unsent_buffer_actions_per_pad, pad, []),
+        state: new_fsm_state
+    }
+
+    if state.closed do
+      process_end_of_stream(ctx, state)
+    else
+      process_buffer(state, Map.keys(ctx.pads))
+    end
   end
 
   @impl true
@@ -60,22 +77,57 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
-  def handle_process(:input, buffer, ctx, state) do
-    process_buffer(buffer, state, Map.keys(ctx.pads))
+  def handle_buffer(:input, buffer, ctx, state) do
+    state =
+      update_in(
+        state,
+        [:demuxer],
+        &TS.Demuxer.push_buffer(
+          &1,
+          buffer.payload,
+          Map.get(buffer.metadata, :discontinuity) || false
+        )
+      )
+
+    process_buffer(state, Map.keys(ctx.pads))
   end
 
   @impl true
   def handle_end_of_stream(:input, ctx, state) do
     demuxer = TS.Demuxer.end_of_stream(state.demuxer)
     state = %{state | closed: true, demuxer: demuxer}
+    process_end_of_stream(ctx, state)
+  end
+
+  defp process_end_of_stream(ctx, state) do
+    {buffer_actions, state} = process_buffer(state, Map.keys(ctx.pads))
+
+    {flushed_actions, state} =
+      Enum.flat_map(state.unsent_buffer_actions_per_pad, fn {_pad, actions} -> actions end)
+      |> update_actions_with_events(state)
+
+    unsent_buffer_actions_per_pad =
+      Enum.map(state.unsent_buffer_actions_per_pad, fn {k, _v} -> {k, []} end)
+      |> Enum.into(Map.new())
+
+    state = %{state | unsent_buffer_actions_per_pad: unsent_buffer_actions_per_pad}
+
+    eos_actions =
+      ctx.pads
+      |> Enum.filter(fn
+        {{Membrane.Pad, :output, _id}, pad} when pad.end_of_stream? == false ->
+          true
+
+        {_other, _pad} ->
+          false
+      end)
+      |> Enum.map(fn {pad_name, _pad} -> {:end_of_stream, pad_name} end)
 
     actions =
-      Map.keys(ctx.pads)
-      |> Enum.filter(fn
-        {Membrane.Pad, :output, _id} -> true
-        _other -> false
-      end)
-      |> Enum.map(fn pad_name -> {:end_of_stream, pad_name} end)
+      Enum.reject(buffer_actions, fn
+        {:redemand, _args} -> true
+        _other_action -> false
+      end) ++ flushed_actions ++ eos_actions
 
     {actions, state}
   end
@@ -115,29 +167,19 @@ defmodule Membrane.MPEG.TS.Demuxer do
       end)
       |> Enum.map(fn pad -> {:redemand, pad} end)
 
-    {redemand_actions, %{state | demuxer: demuxer}}
+    {redemand_actions, %{state | demuxer: demuxer, state: :online}}
   end
 
-  defp process_buffer(buffer, state = %{state: :waiting_pmt}, _pads) do
+  defp process_buffer(state = %{state: :waiting_pmt}, _pads) do
     # Eventually I would prefer to drop the state differentiation and notify
     # the pipeline each time a different PMT table is parsed.
-    state =
-      update_in(
-        state,
-        [:demuxer],
-        &TS.Demuxer.push_buffer(
-          &1,
-          buffer.payload,
-          Map.get(buffer.metadata, :discontinuity) || false
-        )
-      )
 
     pmt = state.demuxer.pmt
 
     if pmt != nil do
       Process.send_after(self(), :start_stream_filter, @stream_filter_timeout)
       actions = [{:notify_parent, {:mpeg_ts_pmt, pmt}}]
-      state = %{state | state: :online}
+      state = %{state | state: :waiting_for_pads}
       {actions, state}
     else
       actions = [{:demand, Pad.ref(:input)}]
@@ -145,19 +187,9 @@ defmodule Membrane.MPEG.TS.Demuxer do
     end
   end
 
-  defp process_buffer(buffer, state = %{state: :online}, pads) do
-    state =
-      update_in(
-        state,
-        [:demuxer],
-        &TS.Demuxer.push_buffer(
-          &1,
-          buffer.payload,
-          Map.get(buffer.metadata, :discontinuity) || false
-        )
-      )
-
+  defp process_buffer(state, pads) do
     # Fetch packet buffers for each pad.
+
     {buf, demuxer} =
       Enum.filter(pads, fn
         {Membrane.Pad, :output, _id} -> true
@@ -316,7 +348,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   defp parse_pts_or_dts(nil), do: nil
 
   defp parse_pts_or_dts(ts) do
-    use Ratio
+    use Numbers, overload_operators: true
 
     (ts * Membrane.Time.second() / @h264_time_base)
     |> Ratio.trunc()

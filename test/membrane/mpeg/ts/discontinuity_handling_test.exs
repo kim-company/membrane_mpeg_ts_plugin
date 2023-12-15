@@ -11,7 +11,7 @@ defmodule Membrane.MPEG.TS.DiscontinuityHandlingTest do
   defmodule TestingSink do
     use Membrane.Sink
 
-    def_input_pad(:input, accepted_format: _any, flow_control: :auto)
+    def_input_pad(:input, accepted_format: _any)
 
     @impl true
     def handle_init(_ctx, _opts) do
