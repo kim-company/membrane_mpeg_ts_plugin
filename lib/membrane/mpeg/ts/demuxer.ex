@@ -58,9 +58,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
     }
 
     if state.closed do
-      process_end_of_stream(ctx, state)
+      process_end_of_stream(state, ctx.pads)
     else
-      process_buffer(state, Map.keys(ctx.pads))
+      {actions, state} = get_buffers(state, Map.keys(ctx.pads))
+      redemands = get_redemands(Map.keys(ctx.pads))
+      {actions ++ redemands, state}
     end
   end
 
@@ -89,32 +91,33 @@ defmodule Membrane.MPEG.TS.Demuxer do
         )
       )
 
-    process_buffer(state, Map.keys(ctx.pads))
+    {actions, state} = get_buffers(state, Map.keys(ctx.pads))
+
+    redemands = get_redemands(Map.keys(ctx.pads))
+
+    {actions ++ redemands, state}
+  end
+
+  defp get_redemands(pad_names) do
+    Enum.filter(pad_names, fn
+      {Membrane.Pad, :output, _id} -> true
+      _other -> false
+    end)
+    |> Enum.map(fn pad -> {:redemand, pad} end)
   end
 
   @impl true
   def handle_end_of_stream(:input, ctx, state) do
     demuxer = TS.Demuxer.end_of_stream(state.demuxer)
     state = %{state | closed: true, demuxer: demuxer}
-    process_end_of_stream(ctx, state)
+    process_end_of_stream(state, ctx.pads)
   end
 
-  defp process_end_of_stream(ctx, state) do
-    {buffer_actions, state} = process_buffer(state, Map.keys(ctx.pads))
-
-    {flushed_actions, state} =
-      Enum.flat_map(state.unsent_buffer_actions_per_pad, fn {_pad, actions} -> actions end)
-      |> update_actions_with_events(state)
-
-    unsent_buffer_actions_per_pad =
-      Enum.map(state.unsent_buffer_actions_per_pad, fn {k, _v} -> {k, []} end)
-      |> Enum.into(Map.new())
-
-    state = %{state | unsent_buffer_actions_per_pad: unsent_buffer_actions_per_pad}
+  defp process_end_of_stream(state, pads) do
+    {flushed_actions, state} = flush_buffers(state, Map.keys(pads))
 
     eos_actions =
-      ctx.pads
-      |> Enum.filter(fn
+      Enum.filter(pads, fn
         {{Membrane.Pad, :output, _id}, pad} when pad.end_of_stream? == false ->
           true
 
@@ -123,13 +126,23 @@ defmodule Membrane.MPEG.TS.Demuxer do
       end)
       |> Enum.map(fn {pad_name, _pad} -> {:end_of_stream, pad_name} end)
 
-    actions =
-      Enum.reject(buffer_actions, fn
-        {:redemand, _args} -> true
-        _other_action -> false
-      end) ++ flushed_actions ++ eos_actions
-
+    actions = flushed_actions ++ eos_actions
     {actions, state}
+  end
+
+  defp flush_buffers(state, pad_names) do
+    {buffers_actions, state} = get_buffers(state, pad_names)
+
+    {last_buffer_actions, state} =
+      Enum.flat_map(state.unsent_buffer_actions_per_pad, fn {_pad, actions} -> actions end)
+      |> update_actions_with_events(state)
+
+    unsent_buffer_actions_per_pad =
+      Enum.map(state.unsent_buffer_actions_per_pad, fn {k, _v} -> {k, []} end)
+      |> Enum.into(Map.new())
+
+    state = %{state | unsent_buffer_actions_per_pad: unsent_buffer_actions_per_pad}
+    {buffers_actions ++ last_buffer_actions, state}
   end
 
   @impl true
@@ -170,7 +183,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {redemand_actions, %{state | demuxer: demuxer, state: :online}}
   end
 
-  defp process_buffer(state = %{state: :waiting_pmt}, _pads) do
+  defp get_buffers(state = %{state: :waiting_pmt}, _pad_names) do
     # Eventually I would prefer to drop the state differentiation and notify
     # the pipeline each time a different PMT table is parsed.
 
@@ -187,11 +200,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
     end
   end
 
-  defp process_buffer(state, pads) do
+  defp get_buffers(state, pads_names) do
     # Fetch packet buffers for each pad.
 
     {buf, demuxer} =
-      Enum.filter(pads, fn
+      Enum.filter(pads_names, fn
         {Membrane.Pad, :output, _id} -> true
         _other -> false
       end)
@@ -236,15 +249,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {actions_with_events, state} = update_actions_with_events(buffer_actions, state)
     state = %{state | demuxer: demuxer}
 
-    redemand_actions =
-      pads
-      |> Enum.filter(fn
-        {Membrane.Pad, :output, _id} -> true
-        _other -> false
-      end)
-      |> Enum.map(fn pad -> {:redemand, pad} end)
-
-    {actions_with_events ++ redemand_actions, state}
+    {actions_with_events, state}
   end
 
   defp update_actions_with_events(buffer_actions, state) do
