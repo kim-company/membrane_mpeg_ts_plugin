@@ -276,7 +276,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   defp maybe_update_stream_format_per_pad(pad, state, actions) do
     all_actions = state.unsent_buffer_actions_per_pad[pad] ++ actions
-    shifted_actions = Enum.slice(all_actions, 1..-1) ++ [nil]
+    shifted_actions = Enum.slice(all_actions, 1..-1//1) ++ [nil]
 
     Enum.zip(all_actions, shifted_actions)
     |> Enum.flat_map_reduce(state, fn
