@@ -1,4 +1,6 @@
 # Membrane MPEG.TS Plugin
+![Hex.pm Version](https://img.shields.io/hexpm/v/membrane_mpeg_ts_plugin)
+
 MPEG-TS Demuxer that implements the Membrane.Filter behaviour.
 
 This element is used in production.
