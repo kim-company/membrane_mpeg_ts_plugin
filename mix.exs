@@ -8,7 +8,26 @@ defmodule Membrane.MPEG.TS.MixProject do
       elixir: "~> 1.13",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      source_url: "https://github.com/kim-company/membrane_mpeg_ts_plugin",
+      name: "Membrane MPEG.TS Plugin",
+      description: description(),
+      package: package(),
       deps: deps()
+    ]
+  end
+
+  defp description do
+    """
+    MPEG-TS Demuxer that implements the Membrane.Filter behaviour.
+    """
+  end
+
+  defp package do
+    [
+      maintainers: ["KIM Keep In Mind"],
+      files: ~w(lib mix.exs README.md LICENSE),
+      licenses: ["Apache-2.0"],
+      links: %{"GitHub" => "https://github.com/kim-company/membrane_mpeg_ts_plugin"}
     ]
   end
 
@@ -24,8 +43,9 @@ defmodule Membrane.MPEG.TS.MixProject do
     [
       {:membrane_core, "~> 1.0"},
       {:membrane_h264_format, "~> 0.6.1"},
+      {:kim_mpeg_ts, "~> 1.0"},
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
-      {:kim_mpeg_ts, github: "kim-company/kim_mpeg_ts"}
+      {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
     ]
   end
 
