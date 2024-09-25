@@ -4,7 +4,7 @@ defmodule Membrane.MPEG.TS.MixProject do
   def project do
     [
       app: :membrane_mpeg_ts_plugin,
-      version: "1.0.0",
+      version: "1.0.1",
       elixir: "~> 1.13",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -43,7 +43,7 @@ defmodule Membrane.MPEG.TS.MixProject do
     [
       {:membrane_core, "~> 1.0"},
       {:membrane_h264_format, "~> 0.6.1"},
-      {:kim_mpeg_ts, "~> 1.0"},
+      {:mpeg_ts, "~> 1.0"},
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
     ]
