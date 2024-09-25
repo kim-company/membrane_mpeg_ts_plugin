@@ -6,7 +6,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
   Association Table](https://en.wikipedia.org/wiki/MPEG_transport_stream#PAT)
   and [Program Mapping
   Table](https://en.wikipedia.org/wiki/MPEG_transport_stream#PMT).
-  ```
   """
   use Membrane.Filter
   require Logger
