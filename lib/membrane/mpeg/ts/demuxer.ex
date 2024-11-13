@@ -345,7 +345,13 @@ defmodule Membrane.MPEG.TS.Demuxer do
         %Membrane.H264{alignment: :au}
 
       true ->
-        %Membrane.RemoteStream{}
+        content_format =
+          case Map.fetch!(state.demuxer.pmt.streams, sid)[:stream_type] do
+            :H264 -> Membrane.H264
+            :AAC -> Membrane.AAC
+          end
+
+        %Membrane.RemoteStream{content_format: content_format, type: :bytestream}
     end
   end
 
