@@ -12,8 +12,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   alias MPEG.TS
 
-  @h264_time_base 90_000
-
   # Amount of seconds after which the demuxer will start filtering out streams
   # that are not being followed.
   @stream_filter_timeout 5_000
@@ -166,18 +164,15 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
     demuxer = %TS.Demuxer{state.demuxer | packet_filter: &(&1 in followed_stream_ids)}
 
-    Logger.warning(
+    Logger.debug(
       "PES filtering enabled. Following streams #{inspect(followed_stream_ids)}",
       domain: __MODULE__
     )
 
     redemand_actions =
       ctx.pads
-      |> Enum.filter(fn
-        {Membrane.Pad, :output, _id} -> true
-        _other -> false
-      end)
-      |> Enum.map(fn pad -> {:redemand, pad} end)
+      |> Enum.filter(fn {_ref, pad} -> not pad.end_of_stream? and pad.direction == :output end)
+      |> Enum.map(fn {ref, _pad} -> {:redemand, ref} end)
 
     {redemand_actions, %{state | demuxer: demuxer, state: :online}}
   end
@@ -223,16 +218,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
           Enum.map(
             packets,
             fn x ->
-              pts =
-                parse_pts_or_dts(x.pts)
-
-              dts =
-                parse_pts_or_dts(x.dts)
-
               %Membrane.Buffer{
                 payload: x.data,
-                pts: pts,
-                dts: dts,
+                pts: x.pts,
+                dts: x.dts,
                 metadata: %{
                   stream_id: sid,
                   is_aligned: x.is_aligned,
@@ -337,25 +326,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
     end)
   end
 
-  defp get_format(pad, state, is_aligned) do
-    {_, _, {:stream_id, sid}} = pad
-
-    cond do
-      Map.fetch!(state.demuxer.pmt.streams, sid)[:stream_type] == :H264 and is_aligned ->
-        %Membrane.H264{alignment: :au}
-
-      true ->
-        %Membrane.RemoteStream{}
-    end
-  end
-
-  defp parse_pts_or_dts(nil), do: nil
-
-  defp parse_pts_or_dts(ts) do
-    use Numbers, overload_operators: true
-
-    (ts * Membrane.Time.second() / @h264_time_base)
-    |> Ratio.trunc()
+  defp get_format(_pad, _state, _is_aligned) do
+    %Membrane.RemoteStream{}
   end
 
   defp new_state() do

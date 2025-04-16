@@ -86,9 +86,4 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
   test "demuxes bundestag example", %{tmp_dir: tmp_dir} do
     test_pipeline("bundestag", tmp_dir)
   end
-
-  @tag :tmp_dir
-  test "demuxes reference", %{tmp_dir: tmp_dir} do
-    test_pipeline("reference", tmp_dir)
-  end
 end

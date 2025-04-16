@@ -43,7 +43,7 @@ defmodule Membrane.MPEG.TS.MixProject do
     [
       {:membrane_core, "~> 1.0"},
       {:membrane_h264_format, "~> 0.6.1"},
-      {:mpeg_ts, "~> 1.0"},
+      {:mpeg_ts, "~> 2.0"},
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
     ]
