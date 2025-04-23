@@ -24,7 +24,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   def_output_pad(:output,
     availability: :on_request,
-    accepted_format: %module{} when module in [Membrane.RemoteStream, Membrane.H264],
+    accepted_format: %Membrane.RemoteStream{},
     flow_control: :manual
   )
 
