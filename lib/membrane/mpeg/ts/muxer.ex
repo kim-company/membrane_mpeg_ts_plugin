@@ -32,7 +32,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     availability: :on_request,
     options: [
       stream_type: [
-        spec: :AAC | :H264,
+        spec: :AAC | :H264 | :H265,
         description: """
         Each input is going to become a stream in the PMT with this assigned type.
         """
@@ -194,7 +194,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   def handle_pad_added({Membrane.Pad, :input, id}, ctx, state) do
     stream_type = ctx.pad_options[:stream_type]
 
-    if stream_type not in [:AAC, :H264] do
+    if stream_type not in [:AAC, :H264, :H265] do
       raise RuntimeError, "Linking stream type #{stream_type} is not supported"
     end
 
@@ -210,7 +210,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     stream_id_offset =
       case stream_type do
         :AAC -> @stream_id_audio_offset
-        :H264 -> @stream_id_video_offset
+        video when video in [:H264, :H265] -> @stream_id_video_offset
       end
 
     stream_id = stream_id_offset + stream_id_count
@@ -223,7 +223,7 @@ defmodule Membrane.MPEG.TS.Muxer do
       })
       |> update_in([:pmt, Access.key!(:pcr_pid)], fn old ->
         # We're writing the PCR in the first video stream connected.
-        if is_nil(old) and stream_type == :H264 do
+        if is_nil(old) and stream_type in [:H264, :H265] do
           pid
         else
           old
@@ -239,6 +239,7 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   defp stream_type_id(:AAC), do: 0x0F
   defp stream_type_id(:H264), do: 0x1B
+  defp stream_type_id(:H265), do: 0x24
 
   def pcr_buffer(state) do
     <<>>
