@@ -32,9 +32,10 @@ defmodule Membrane.MPEG.TS.Muxer do
     availability: :on_request,
     options: [
       stream_type: [
-        spec: :AAC | :H264 | :H265,
+        spec: atom(),
         description: """
         Each input is going to become a stream in the PMT with this assigned type.
+        See MPEG.TS.PMT.
         """
       ]
     ]
@@ -193,11 +194,6 @@ defmodule Membrane.MPEG.TS.Muxer do
   @impl true
   def handle_pad_added({Membrane.Pad, :input, id}, ctx, state) do
     stream_type = ctx.pad_options[:stream_type]
-
-    if stream_type not in [:AAC, :H264, :H265] do
-      raise RuntimeError, "Linking stream type #{stream_type} is not supported"
-    end
-
     pid = @stream_pid_offset + Enum.count(state.pmt.streams)
 
     stream_id_count =
@@ -208,9 +204,9 @@ defmodule Membrane.MPEG.TS.Muxer do
       |> Enum.count()
 
     stream_id_offset =
-      case stream_type do
-        :AAC -> @stream_id_audio_offset
-        video when video in [:H264, :H265] -> @stream_id_video_offset
+      cond do
+        MPEG.TS.PMT.is_audio_stream?(stream_type) -> @stream_id_audio_offset
+        MPEG.TS.PMT.is_video_stream?(stream_type) -> @stream_id_video_offset
       end
 
     stream_id = stream_id_offset + stream_id_count
@@ -219,11 +215,11 @@ defmodule Membrane.MPEG.TS.Muxer do
       state
       |> put_in([:pmt, Access.key!(:streams), pid], %{
         stream_type: stream_type,
-        stream_type_id: stream_type_id(stream_type)
+        stream_type_id: MPEG.TS.PMT.parse_stream_type(stream_type)
       })
       |> update_in([:pmt, Access.key!(:pcr_pid)], fn old ->
         # We're writing the PCR in the first video stream connected.
-        if is_nil(old) and stream_type in [:H264, :H265] do
+        if is_nil(old) and MPEG.TS.PMT.is_video_stream?(stream_type) do
           pid
         else
           old
@@ -236,10 +232,6 @@ defmodule Membrane.MPEG.TS.Muxer do
 
     {[], state}
   end
-
-  defp stream_type_id(:AAC), do: 0x0F
-  defp stream_type_id(:H264), do: 0x1B
-  defp stream_type_id(:H265), do: 0x24
 
   def pcr_buffer(state) do
     <<>>
