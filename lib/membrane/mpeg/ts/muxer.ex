@@ -33,6 +33,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     options: [
       stream_type: [
         spec: atom(),
+        default: nil,
         description: """
         Each input is going to become a stream in the PMT with this assigned type.
         See MPEG.TS.PMT.
@@ -68,6 +69,7 @@ defmodule Membrane.MPEG.TS.Muxer do
        pat: pat,
        pmt: pmt,
        pad_to_pid: %{},
+       pid_to_opts: %{},
        pid_to_queue: %{},
        pid_to_stream_id: %{},
        pid_to_counter: %{@pmt_pid => 0, @pat_pid => 0},
@@ -109,7 +111,50 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   @impl true
-  def handle_stream_format(_pad, _format, _ctx, state) do
+  def handle_stream_format({Membrane.Pad, :input, id}, format, _ctx, state) do
+    pid = get_in(state, [:pad_to_pid, id])
+
+    stream_type =
+      get_in(format, [Access.key!(:content_format), :stream_type]) ||
+        get_in(state, [:pid_to_opts, pid, :stream_type])
+
+    if is_nil(stream_type) do
+      raise RuntimeError, "stream_type unset"
+    end
+
+    stream_id_count =
+      state.pmt.streams
+      |> Map.values()
+      |> Enum.group_by(fn x -> x.stream_type end)
+      |> Map.get(stream_type, [])
+      |> Enum.count()
+
+    stream_id_offset =
+      cond do
+        MPEG.TS.PMT.is_audio_stream?(stream_type) -> @stream_id_audio_offset
+        MPEG.TS.PMT.is_video_stream?(stream_type) -> @stream_id_video_offset
+      end
+
+    stream_id = stream_id_offset + stream_id_count
+
+    state =
+      state
+      |> put_in([:pmt, Access.key!(:streams), pid], %{
+        stream_type: stream_type,
+        stream_type_id: MPEG.TS.PMT.encode_stream_type(stream_type)
+      })
+      |> update_in([:pmt, Access.key!(:pcr_pid)], fn old ->
+        # We're writing the PCR in the first video stream connected.
+        if is_nil(old) and MPEG.TS.PMT.is_video_stream?(stream_type) do
+          pid
+        else
+          old
+        end
+      end)
+      |> put_in([:pid_to_stream_id, pid], stream_id)
+      |> put_in([:pid_to_counter, pid], 0)
+      |> put_in([:pid_to_queue, pid], :queue.new())
+
     {[], state}
   end
 
@@ -193,42 +238,12 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   @impl true
   def handle_pad_added({Membrane.Pad, :input, id}, ctx, state) do
-    stream_type = ctx.pad_options[:stream_type]
-    pid = @stream_pid_offset + Enum.count(state.pmt.streams)
-
-    stream_id_count =
-      state.pmt.streams
-      |> Map.values()
-      |> Enum.group_by(fn x -> x.stream_type end)
-      |> Map.get(stream_type, [])
-      |> Enum.count()
-
-    stream_id_offset =
-      cond do
-        MPEG.TS.PMT.is_audio_stream?(stream_type) -> @stream_id_audio_offset
-        MPEG.TS.PMT.is_video_stream?(stream_type) -> @stream_id_video_offset
-      end
-
-    stream_id = stream_id_offset + stream_id_count
+    pid = @stream_pid_offset + Enum.count(state.pad_to_pid)
 
     state =
       state
-      |> put_in([:pmt, Access.key!(:streams), pid], %{
-        stream_type: stream_type,
-        stream_type_id: MPEG.TS.PMT.parse_stream_type(stream_type)
-      })
-      |> update_in([:pmt, Access.key!(:pcr_pid)], fn old ->
-        # We're writing the PCR in the first video stream connected.
-        if is_nil(old) and MPEG.TS.PMT.is_video_stream?(stream_type) do
-          pid
-        else
-          old
-        end
-      end)
       |> put_in([:pad_to_pid, id], pid)
-      |> put_in([:pid_to_stream_id, pid], stream_id)
-      |> put_in([:pid_to_counter, pid], 0)
-      |> put_in([:pid_to_queue, pid], :queue.new())
+      |> put_in([:pid_to_opts, id], ctx.pad_options)
 
     {[], state}
   end
