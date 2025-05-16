@@ -62,12 +62,17 @@ defmodule Membrane.MPEG.TS.Muxer do
       pcr_pid: nil
     }
 
-    {:ok, {:interval, timer}} = :timer.send_interval(500, :pcr, self())
+    {:ok, {:interval, timer}} = :timer.send_interval(100, :pcr, self())
 
     {[],
      %{
        pat: pat,
        pmt: pmt,
+       pcr: %{
+         timer: timer,
+         reference_monotonic: nil,
+         reference_dts: nil
+       },
        pad_to_pid: %{},
        pid_to_opts: %{},
        pid_to_queue: %{},
@@ -96,7 +101,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   @impl true
-  def handle_info(:pcr, %{playback: :playing}, state) do
+  def handle_info(:pcr, %{playback: :playing}, state = %{pat_written?: true}) do
     {pcr, state} = pcr_buffer(state)
     {[buffer: {:output, pcr}], state}
   end
@@ -164,6 +169,15 @@ defmodule Membrane.MPEG.TS.Muxer do
 
     state
     |> update_in([:pid_to_queue, pid], fn q -> :queue.in(buffer, q) end)
+    |> then(fn state ->
+      if pid == state.pmt.pcr_pid and state.pcr.reference_monotonic == nil do
+        state
+        |> put_in([:pcr, :reference_monotonic], :erlang.monotonic_time(:nanosecond))
+        |> put_in([:pcr, :reference_dts], Membrane.Buffer.get_dts_or_pts(buffer))
+      else
+        state
+      end
+    end)
     |> mux_and_forward_oldest([])
   end
 
@@ -190,6 +204,10 @@ defmodule Membrane.MPEG.TS.Muxer do
       end)
 
     {[buffer: {:output, buffers}, end_of_stream: :output], state}
+  end
+
+  defp mux_and_forward_oldest(state = %{pmt: %{pcr_pid: nil}}, []) do
+    {[], state}
   end
 
   defp mux_and_forward_oldest(state, acc) do
@@ -224,13 +242,21 @@ defmodule Membrane.MPEG.TS.Muxer do
     {pes, state} = pes_buffers(pid, buffer, state)
 
     {buffers, state} =
+      if pid == state.pmt.pcr_pid do
+        {pcr, state} = pcr_buffer(state)
+        {[pcr | pes], state}
+      else
+        {pes, state}
+      end
+
+    {buffers, state} =
       if is_keyframe? or not state.pat_written? do
         {pat, state} = pat_buffer(state)
         {pmt, state} = pmt_buffer(state)
 
-        {List.flatten([pat, pmt, pes]), put_in(state, [:pat_written?], true)}
+        {List.flatten([pat, pmt, buffers]), put_in(state, [:pat_written?], true)}
       else
-        {pes, state}
+        {buffers, state}
       end
 
     {buffers, state}
@@ -243,14 +269,19 @@ defmodule Membrane.MPEG.TS.Muxer do
     state =
       state
       |> put_in([:pad_to_pid, id], pid)
-      |> put_in([:pid_to_opts, id], ctx.pad_options)
+      |> put_in([:pid_to_opts, pid], ctx.pad_options)
 
     {[], state}
   end
 
   def pcr_buffer(state) do
+    pcr =
+      state
+      |> pcr()
+      |> marshal_pcr()
+
     <<>>
-    |> marshal_ts(state.pmt.pcr_pid, state, pcr: 1)
+    |> marshal_ts(state.pmt.pcr_pid, state, pcr: pcr)
     |> then(fn {packets, state} -> {packet_to_buffer(packets), state} end)
   end
 
@@ -288,7 +319,7 @@ defmodule Membrane.MPEG.TS.Muxer do
       Keyword.validate!(opts,
         discontinuity: 0,
         rai: 0,
-        pcr: 0
+        pcr: nil
       )
 
     do_marshal_ts(payload, pid, state, opts)
@@ -296,7 +327,7 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   def do_marshal_ts(<<>>, pid, state, opts) do
     pad_size = @ts_packet_size - @ts_header_size - @ts_adaptation_header_size
-    pad_size = if(opts[:pcr] == 1, do: pad_size - @ts_pcr_size, else: pad_size)
+    pad_size = if(opts[:pcr], do: pad_size - @ts_pcr_size, else: pad_size)
     adaptation_field = marshal_adaptation_field(pad_size, opts)
 
     # Counter is only updated when a payload is provided.
@@ -394,7 +425,7 @@ defmodule Membrane.MPEG.TS.Muxer do
           adaptation_field =
             marshal_adaptation_field(pad_size,
               # We override the options as those are useful for the first packet of the series only.
-              pcr: 0,
+              pcr: nil,
               rai: 0,
               discontinuity: 0
             )
@@ -411,7 +442,7 @@ defmodule Membrane.MPEG.TS.Muxer do
           adaptation_field =
             marshal_adaptation_field(pad_size,
               # We override the options as those are useful for the first packet of the series only.
-              pcr: 0,
+              pcr: nil,
               rai: 0,
               discontinuity: 0
             )
@@ -451,9 +482,8 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   defp marshal_adaptation_field(pad_size, opts) do
     {pcr_flag, pcr} =
-      if opts[:pcr] == 1 do
-        pcr = marshal_pcr(pcr(:erlang.monotonic_time(:nanosecond)))
-        {1, pcr}
+      if opts[:pcr] != nil do
+        {1, opts[:pcr]}
       else
         {0, <<>>}
       end
@@ -609,7 +639,10 @@ defmodule Membrane.MPEG.TS.Muxer do
     <<section::binary, crc::32>>
   end
 
-  defp marshal_pcr({base, ext}) do
+  defp marshal_pcr(time_ns) do
+    base = div(time_ns * 90_000, 1_000_000_000)
+    ext = rem(div(time_ns * 27_000_000, 1_000_000_000), 300)
+
     <<base::size(33), 0::size(6), ext::size(9)>>
   end
 
@@ -629,11 +662,10 @@ defmodule Membrane.MPEG.TS.Muxer do
     )
   end
 
-  defp pcr(time_ns) do
-    pcr_base = div(time_ns * 90_000, 1_000_000_000)
-    pcr_ext = rem(div(time_ns * 27_000_000, 1_000_000_000), 300)
-
-    {pcr_base, pcr_ext}
+  defp pcr(state) do
+    now = :erlang.monotonic_time()
+    elapsed = now - state.pcr.reference_monotonic
+    state.pcr.reference_dts + elapsed
   end
 
   defp packet_to_buffer(packets) when is_list(packets) do
