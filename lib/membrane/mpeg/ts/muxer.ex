@@ -663,7 +663,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   defp pcr(state) do
-    now = :erlang.monotonic_time()
+    now = :erlang.monotonic_time(:nanosecond)
     elapsed = now - state.pcr.reference_monotonic
     state.pcr.reference_dts + elapsed
   end
