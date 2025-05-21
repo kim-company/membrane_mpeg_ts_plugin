@@ -62,7 +62,7 @@ defmodule Membrane.MPEG.TS.Muxer do
       pcr_pid: nil
     }
 
-    {:ok, {:interval, timer}} = :timer.send_interval(100, :pcr, self())
+    {:ok, {:interval, timer}} = :timer.send_interval(100, self(), :pcr)
 
     {[],
      %{
@@ -101,7 +101,11 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   @impl true
-  def handle_info(:pcr, %{playback: :playing}, state = %{pat_written?: true}) do
+  def handle_info(
+        :pcr,
+        %{playback: :playing, pads: %{output: %{end_of_stream?: false}}},
+        state = %{pat_written?: true}
+      ) do
     {pcr, state} = pcr_buffer(state)
     {[buffer: {:output, pcr}], state}
   end
