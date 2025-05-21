@@ -14,7 +14,6 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   @pmt_pid 4096
   @pat_pid 0x0
-  @pid_counter_max 2 ** 4
   @pes_packet_size_max 2 ** 16
 
   # We'll start using PIDs from this offset.
@@ -77,7 +76,7 @@ defmodule Membrane.MPEG.TS.Muxer do
        pid_to_opts: %{},
        pid_to_queue: %{},
        pid_to_stream_id: %{},
-       pid_to_counter: %{@pmt_pid => 0, @pat_pid => 0},
+       pid_to_counter: %{@pmt_pid => nil, @pat_pid => nil},
        pcr_timer: timer,
        pat_written?: false
      }}
@@ -161,7 +160,7 @@ defmodule Membrane.MPEG.TS.Muxer do
         end
       end)
       |> put_in([:pid_to_stream_id, pid], stream_id)
-      |> put_in([:pid_to_counter, pid], 0)
+      |> put_in([:pid_to_counter, pid], nil)
       |> put_in([:pid_to_queue, pid], :queue.new())
 
     {[], state}
@@ -248,7 +247,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     {buffers, state} =
       if pid == state.pmt.pcr_pid do
         {pcr, state} = pcr_buffer(state)
-        {[pcr | pes], state}
+        {pes ++ [pcr], state}
       else
         {pes, state}
       end
@@ -335,10 +334,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     adaptation_field = marshal_adaptation_field(pad_size, opts)
 
     # Counter is only updated when a payload is provided.
-    counter =
-      state
-      |> get_in([:pid_to_counter, pid])
-      |> rem(@pid_counter_max)
+    counter = get_in(state, [:pid_to_counter, pid])
 
     packet = <<
       0x47::8,
@@ -480,7 +476,8 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   defp counter(pid, state) do
     get_and_update_in(state, [:pid_to_counter, pid], fn old ->
-      {rem(old, @pid_counter_max), old + 1}
+      new_value = if is_nil(old), do: 1, else: old + 1
+      {new_value, new_value}
     end)
   end
 
