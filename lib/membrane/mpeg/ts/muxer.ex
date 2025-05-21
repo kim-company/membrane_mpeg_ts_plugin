@@ -99,15 +99,15 @@ defmodule Membrane.MPEG.TS.Muxer do
     end
   end
 
-  @impl true
-  def handle_info(
-        :pcr,
-        %{playback: :playing, pads: %{output: %{end_of_stream?: false}}},
-        state = %{pat_written?: true}
-      ) do
-    {pcr, state} = pcr_buffer(state)
-    {[buffer: {:output, pcr}], state}
-  end
+  # @impl true
+  # def handle_info(
+  #       :pcr,
+  #       %{playback: :playing, pads: %{output: %{end_of_stream?: false}}},
+  #       state = %{pat_written?: true}
+  #     ) do
+  #   {pcr, state} = pcr_buffer(state)
+  #   {[buffer: {:output, pcr}], state}
+  # end
 
   def handle_info(:pcr, _ctx, state) do
     {[], state}
@@ -246,8 +246,8 @@ defmodule Membrane.MPEG.TS.Muxer do
 
     {buffers, state} =
       if pid == state.pmt.pcr_pid do
-        {pcr, state} = pcr_buffer(state)
-        {pes ++ [pcr], state}
+        # {pcr, state} = pcr_buffer(state)
+        {pes, state}
       else
         {pes, state}
       end
