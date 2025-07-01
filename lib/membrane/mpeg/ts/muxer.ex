@@ -119,11 +119,23 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   @impl true
+  def handle_pad_added({Membrane.Pad, :input, id}, ctx, state) do
+    pid = @stream_pid_offset + Enum.count(state.pad_to_pid)
+
+    state =
+      state
+      |> put_in([:pad_to_pid, id], pid)
+      |> put_in([:pid_to_opts, pid], ctx.pad_options)
+
+    {[], state}
+  end
+
+  @impl true
   def handle_stream_format({Membrane.Pad, :input, id}, format, _ctx, state) do
     pid = get_in(state, [:pad_to_pid, id])
 
     stream_type =
-      get_in(format, [Access.key!(:content_format), :stream_type]) ||
+      get_in(format, [Access.key!(:content_format), Access.key(:stream_type)]) ||
         get_in(state, [:pid_to_opts, pid, :stream_type])
 
     if is_nil(stream_type) do
@@ -262,19 +274,24 @@ defmodule Membrane.MPEG.TS.Muxer do
         {buffers, state}
       end
 
+    buffers =
+      case buffers do
+        [h | t] ->
+          h
+          |> put_in([Access.key!(:metadata), :pusi], is_keyframe?)
+          |> List.wrap()
+          |> Enum.concat(t)
+          |> Enum.map(fn x ->
+            x
+            |> put_in([Access.key!(:pts)], buffer.pts)
+            |> put_in([Access.key!(:dts)], buffer.dts)
+          end)
+
+        [] ->
+          []
+      end
+
     {buffers, state}
-  end
-
-  @impl true
-  def handle_pad_added({Membrane.Pad, :input, id}, ctx, state) do
-    pid = @stream_pid_offset + Enum.count(state.pad_to_pid)
-
-    state =
-      state
-      |> put_in([:pad_to_pid, id], pid)
-      |> put_in([:pid_to_opts, pid], ctx.pad_options)
-
-    {[], state}
   end
 
   def pcr_buffer(state) do
