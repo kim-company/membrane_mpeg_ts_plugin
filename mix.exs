@@ -45,6 +45,7 @@ defmodule Membrane.MPEG.TS.MixProject do
       {:crc, "~> 0.10"},
       {:membrane_core, "~> 1.0"},
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
+      {:membrane_nalu_plugin, "~> 0.1", only: :test},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
     ]
   end

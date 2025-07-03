@@ -67,7 +67,7 @@ defmodule Membrane.MPEG.TS.Aggregator do
 
   def handle_buffer(:input, buffer, _ctx, state = %{acc: []}) do
     Membrane.Logger.warning(
-      "Received buffer before PUSI indicator -- dropping (pts: #{buffer.pts}"
+      "Received buffer before PUSI indicator -- dropping (pts: #{buffer.pts})"
     )
 
     # We're waiting until the first buffer with PUSI indicator set before
@@ -101,6 +101,8 @@ defmodule Membrane.MPEG.TS.Aggregator do
   defp finalize_segment(state, duration) do
     buffers = Enum.reverse(state.acc)
 
+    units = Enum.flat_map(buffers, fn x -> Map.get(x.metadata, :units, []) end)
+
     payload =
       buffers
       |> Enum.map(fn x -> x.payload end)
@@ -110,7 +112,7 @@ defmodule Membrane.MPEG.TS.Aggregator do
       payload: payload,
       pts: state.pts,
       dts: state.dts,
-      metadata: %{pusi: true, duration: duration}
+      metadata: %{pusi: true, duration: duration, units: units}
     }
 
     state =
