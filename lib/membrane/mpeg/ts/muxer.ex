@@ -254,7 +254,6 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   defp mux_and_forward(pid, buffer, state) do
     is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
-
     {pes, state} = pes_buffers(pid, buffer, state)
 
     {buffers, state} =
@@ -280,7 +279,15 @@ defmodule Membrane.MPEG.TS.Muxer do
         [h | t] ->
           h
           |> put_in([Access.key!(:metadata), :pusi], is_keyframe?)
-          |> put_in([Access.key!(:metadata), :units], buffer.metadata.units)
+          |> then(fn h ->
+            units = Map.get(buffer.metadata, :units)
+
+            if units != nil do
+              put_in(h, [Access.key!(:metadata), :units], units)
+            else
+              h
+            end
+          end)
           |> List.wrap()
           |> Enum.concat(t)
           |> Enum.map(fn x ->
