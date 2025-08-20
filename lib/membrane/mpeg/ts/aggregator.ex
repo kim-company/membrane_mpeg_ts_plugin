@@ -10,12 +10,12 @@ defmodule Membrane.MPEG.TS.Aggregator do
   )
 
   def_options(
-    min_duration: [
+    target_duration: [
       spec: Membrane.Time.t(),
       default: Membrane.Time.seconds(2),
       description: """
-      After accumulating enough buffers to cover this duration, the output buffer
-      will be finalized as soon as the next PUSI unit is found.
+      Segments will converge to this duration. When a segment exceeds the target,
+      the excess is credited to the next segment to maintain average duration.
       """
     ]
   )
@@ -23,10 +23,11 @@ defmodule Membrane.MPEG.TS.Aggregator do
   @impl true
   def handle_init(_ctx, opts) do
     state = %{
-      min_duration: opts.min_duration,
+      target_duration: opts.target_duration,
       acc: [],
       pts: nil,
-      dts: nil
+      dts: nil,
+      accumulated_offset: 0
     }
 
     {[], state}
@@ -53,10 +54,11 @@ defmodule Membrane.MPEG.TS.Aggregator do
   end
 
   def handle_buffer(:input, buffer = %{metadata: %{pusi: true}}, _ctx, state) do
-    duration = buffer.pts - state.pts
+    actual_duration = buffer.pts - state.pts
+    duration = state.accumulated_offset + actual_duration
 
-    if duration >= state.min_duration do
-      {output, state} = finalize_segment(state, duration)
+    if duration >= state.target_duration do
+      {output, state} = finalize_segment(state, actual_duration)
       state = init_segment(state, buffer)
       {[buffer: {:output, output}], state}
     else
@@ -115,11 +117,15 @@ defmodule Membrane.MPEG.TS.Aggregator do
       metadata: %{pusi: true, duration: duration, units: units}
     }
 
+    # Calculate offset to carry forward to next segment
+    offset = duration - state.target_duration
+
     state =
       state
       |> put_in([:acc], [])
       |> put_in([:pts], nil)
       |> put_in([:dts], nil)
+      |> update_in([:accumulated_offset], fn current_offset -> current_offset + offset end)
 
     {buffer, state}
   end
