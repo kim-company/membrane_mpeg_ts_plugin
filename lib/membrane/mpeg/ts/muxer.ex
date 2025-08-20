@@ -13,6 +13,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   alias MPEG.TS
 
   @pmt_pid 4096
+  @pcr_pid_fallback 0x1FFF
   @pat_pid 0x0
   @pes_packet_size_max 2 ** 16
 
@@ -58,7 +59,9 @@ defmodule Membrane.MPEG.TS.Muxer do
       # improve the random access accuracy of the stream's timing that is derived from
       # the program timestamp. If this is unused. then it is set to 0x1FFF (all bits
       # on).
-      pcr_pid: nil
+      # NOTE: has soon as we are not able to produce a valid PCR, we're not adding any
+      # (and ffmpeg is happy with it).
+      pcr_pid: @pcr_pid_fallback
     }
 
     {:ok, {:interval, timer}} = :timer.send_interval(100, self(), :pcr)
@@ -255,7 +258,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   defp mux_and_forward(pid, buffer, state) do
     is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
     stream_id = get_in(state, [:pid_to_stream_id, pid])
-    is_audio? = stream_id == @stream_id_audio_offset
+    is_audio? = is_audio_stream_id?(stream_id)
     {pes, state} = pes_buffers(pid, buffer, state)
 
     {buffers, state} =
@@ -334,7 +337,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     stream_id = get_in(state, [:pid_to_stream_id, pid])
 
     is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
-    is_audio? = stream_id == @stream_id_audio_offset
+    is_audio? = is_audio_stream_id?(stream_id)
 
     buffer
     |> update_in([Access.key!(:dts)], fn dts ->
@@ -621,8 +624,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   defp marshal_pmt(pmt) do
-    pcr_pid = pmt.pcr_pid || 0x1FFF
-    header = <<0x07::3, pcr_pid::13, 0x0F::4, 0::2, 0::10>>
+    header = <<0x07::3, pmt.pcr_pid::13, 0x0F::4, 0::2, 0::10>>
 
     # TODO: ffmpeg adds a stream info field for the audio specifying the 'und' language.
     # TODO: we can signal the presence of subtitles in the video stream: https://chatgpt.com/share/67f4ff05-2234-8004-9395-d1fe8b9cb992
@@ -714,5 +716,9 @@ defmodule Membrane.MPEG.TS.Muxer do
     end
 
     %Membrane.Buffer{payload: packet}
+  end
+
+  defp is_audio_stream_id?(stream_id) do
+    stream_id >= @stream_id_audio_offset and stream_id < @stream_id_video_offset
   end
 end
