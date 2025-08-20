@@ -619,7 +619,8 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   defp marshal_pmt(pmt) do
-    header = <<0x07::3, pmt.pcr_pid::13, 0x0F::4, 0::2, 0::10>>
+    pcr_pid = pmt.pcr_pid || 0x1FFF
+    header = <<0x07::3, pcr_pid::13, 0x0F::4, 0::2, 0::10>>
 
     # TODO: ffmpeg adds a stream info field for the audio specifying the 'und' language.
     # TODO: we can signal the presence of subtitles in the video stream: https://chatgpt.com/share/67f4ff05-2234-8004-9395-d1fe8b9cb992
