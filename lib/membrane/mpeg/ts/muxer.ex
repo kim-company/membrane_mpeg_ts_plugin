@@ -624,7 +624,8 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   defp marshal_timestamp(prefix, ts) when prefix in 0x1..0x3 do
-    ts = div(ts * 90_000, 1_000_000_000)
+    # Round nanoseconds to nearest 90 kHz tick to reduce ±1 jitter in frame durations
+    ts = div(ts * 90_000 + 500_000_000, 1_000_000_000)
 
     import Bitwise
     # Extract bits
@@ -691,8 +692,10 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   defp marshal_pcr(time_ns) do
-    base = div(time_ns * 90_000, 1_000_000_000)
-    ext = rem(div(time_ns * 27_000_000, 1_000_000_000), 300)
+    # Compute PCR at 27 MHz with rounding, then split into base (90 kHz) and extension (27 MHz modulo 300)
+    pcr27 = div(time_ns * 27_000_000 + 500_000_000, 1_000_000_000)
+    base = div(pcr27, 300)
+    ext = rem(pcr27, 300)
 
     <<base::size(33), 0::size(6), ext::size(9)>>
   end
