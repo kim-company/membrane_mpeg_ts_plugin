@@ -19,7 +19,7 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       |> via_in(:input)
       |> child(:muxer, Membrane.MPEG.TS.Muxer)
       |> child(:aggregator, %Membrane.MPEG.TS.Aggregator{
-        target_duration: Membrane.Time.seconds(2)
+        target_duration: Membrane.Time.seconds(99999)
       })
       |> child(:debug, %Membrane.Debug.Filter{
         handle_buffer: fn x ->

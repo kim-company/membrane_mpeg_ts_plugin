@@ -13,7 +13,6 @@ defmodule Membrane.MPEG.TS.Muxer do
   alias MPEG.TS
 
   @pmt_pid 4096
-  @pcr_pid_fallback 0x1FFF
   @pat_pid 0x0
   @pes_packet_size_max 2 ** 16
 
@@ -54,33 +53,18 @@ defmodule Membrane.MPEG.TS.Muxer do
 
     pmt = %TS.PMT{
       streams: %{},
-      program_info: [],
-      # The packet identifier that contains the program clock reference used to
-      # improve the random access accuracy of the stream's timing that is derived from
-      # the program timestamp. If this is unused. then it is set to 0x1FFF (all bits
-      # on).
-      # NOTE: has soon as we are not able to produce a valid PCR, we're not adding any
-      # (and ffmpeg is happy with it).
-      pcr_pid: @pcr_pid_fallback
+      program_info: []
     }
-
-    {:ok, {:interval, timer}} = :timer.send_interval(100, self(), :pcr)
 
     {[],
      %{
        pat: pat,
        pmt: pmt,
-       pcr: %{
-         timer: timer,
-         reference_monotonic: nil,
-         reference_dts: nil
-       },
        pad_to_pid: %{},
        pid_to_opts: %{},
        pid_to_queue: %{},
        pid_to_stream_id: %{},
        pid_to_counter: %{@pmt_pid => nil, @pat_pid => nil},
-       pcr_timer: timer,
        pat_written?: false
      }}
   end
@@ -95,26 +79,13 @@ defmodule Membrane.MPEG.TS.Muxer do
       |> Enum.all?()
 
     if end_of_stream? do
-      if state.pcr_timer, do: Process.cancel_timer(state.pcr_timer)
       mux_and_forward_end_of_stream(state)
     else
       {[], state}
     end
   end
 
-  # @impl true
-  # def handle_info(
-  #       :pcr,
-  #       %{playback: :playing, pads: %{output: %{end_of_stream?: false}}},
-  #       state = %{pat_written?: true}
-  #     ) do
-  #   {pcr, state} = pcr_buffer(state)
-  #   {[buffer: {:output, pcr}], state}
-  # end
-
-  def handle_info(:pcr, _ctx, state) do
-    {[], state}
-  end
+  # No timer-driven PCR; PCR is derived from buffer timestamps.
 
   @impl true
   def handle_playing(_ctx, state) do
@@ -187,15 +158,6 @@ defmodule Membrane.MPEG.TS.Muxer do
 
     state
     |> update_in([:pid_to_queue, pid], fn q -> :queue.in(buffer, q) end)
-    |> then(fn state ->
-      if pid == state.pmt.pcr_pid and state.pcr.reference_monotonic == nil do
-        state
-        |> put_in([:pcr, :reference_monotonic], :erlang.monotonic_time(:nanosecond))
-        |> put_in([:pcr, :reference_dts], Membrane.Buffer.get_dts_or_pts(buffer))
-      else
-        state
-      end
-    end)
     |> mux_and_forward_oldest([])
   end
 
@@ -261,13 +223,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     is_audio? = is_audio_stream_id?(stream_id)
     {pes, state} = pes_buffers(pid, buffer, state)
 
-    {buffers, state} =
-      if pid == state.pmt.pcr_pid do
-        # {pcr, state} = pcr_buffer(state)
-        {pes, state}
-      else
-        {pes, state}
-      end
+    {buffers, state} = {pes, state}
 
     {buffers, state} =
       if is_keyframe? or not state.pat_written? do
@@ -308,16 +264,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     {buffers, state}
   end
 
-  def pcr_buffer(state) do
-    pcr =
-      state
-      |> pcr()
-      |> marshal_pcr()
-
-    <<>>
-    |> marshal_ts(state.pmt.pcr_pid, state, pcr: pcr)
-    |> then(fn {packets, state} -> {packet_to_buffer(packets), state} end)
-  end
+  # PCR-only packets not used; PCR is inserted alongside PES payload.
 
   def pmt_buffer(state) do
     state.pmt
@@ -339,12 +286,23 @@ defmodule Membrane.MPEG.TS.Muxer do
     is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
     is_audio? = is_audio_stream_id?(stream_id)
 
+    opts_base = [rai: if(is_keyframe? or is_audio?, do: 1, else: 0)]
+
+    pcr_time_ns = Membrane.Buffer.get_dts_or_pts(buffer)
+
+    opts =
+      if pid == state.pmt.pcr_pid and pcr_time_ns != nil do
+        Keyword.put(opts_base, :pcr, marshal_pcr(pcr_time_ns))
+      else
+        opts_base
+      end
+
     buffer
     |> update_in([Access.key!(:dts)], fn dts ->
       unless is_audio?, do: dts
     end)
     |> marshal_pes(stream_id)
-    |> marshal_ts(pid, state, rai: if(is_keyframe? or is_audio?, do: 1, else: 0))
+    |> marshal_ts(pid, state, opts)
     |> then(fn {packets, state} -> {packet_to_buffer(packets), state} end)
   end
 
@@ -397,16 +355,19 @@ defmodule Membrane.MPEG.TS.Muxer do
     # First packet of the series. We need an adaptation field as this might be a
     # random access unit.
 
+    # Available payload in the first TS packet considering adaptation header and optional PCR
     min_size = @ts_packet_size - @ts_header_size - @ts_adaptation_header_size
+    pcr_overhead = if opts[:pcr], do: @ts_pcr_size, else: 0
+    first_payload_size = min_size - pcr_overhead
 
     {payload, pad_size, rest} =
-      if byte_size(payload) < min_size do
+      if byte_size(payload) < first_payload_size do
         # This packet is small and might require padding.
-        pad_size = min_size - byte_size(payload)
+        pad_size = first_payload_size - byte_size(payload)
         {payload, pad_size, <<>>}
       else
         # Fits into one or more packets.
-        <<payload::binary-size(min_size)-unit(8), rest::binary>> = payload
+        <<payload::binary-size(first_payload_size)-unit(8), rest::binary>> = payload
         {payload, 0, rest}
       end
 
@@ -583,7 +544,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     packet_length = byte_size(optional_pes_header) + byte_size(buffer.payload)
 
     # packet length of 0 means unbounded PES and its only valid for video streams.
-    packet_length = if(stream_id == @stream_id_video_offset, do: 0, else: packet_length)
+    packet_length = if stream_id == @stream_id_video_offset, do: 0, else: packet_length
 
     if packet_length > @pes_packet_size_max do
       raise RuntimeError, "Attempted to generate a PES that exceeds max size"
@@ -694,11 +655,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     )
   end
 
-  defp pcr(state) do
-    now = :erlang.monotonic_time(:nanosecond)
-    elapsed = now - state.pcr.reference_monotonic
-    state.pcr.reference_dts + elapsed
-  end
+  # No wall-clock PCR computation; PCR is derived from buffer timestamps.
 
   defp packet_to_buffer(packets) when is_list(packets) do
     Enum.map(packets, &packet_to_buffer/1)
