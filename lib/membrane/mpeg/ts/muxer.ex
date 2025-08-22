@@ -60,6 +60,8 @@ defmodule Membrane.MPEG.TS.Muxer do
      %{
        pat: pat,
        pmt: pmt,
+       time_base_ns: nil,
+       pcr_last_time: nil,
        pad_to_pid: %{},
        pid_to_opts: %{},
        pid_to_queue: %{},
@@ -218,12 +220,37 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   defp mux_and_forward(pid, buffer, state) do
+    # Initialize time base on first forwarded buffer (in mux order)
+    state =
+      if is_nil(state.time_base_ns) do
+        put_in(state, [:time_base_ns], Membrane.Buffer.get_dts_or_pts(buffer))
+      else
+        state
+      end
+
     is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
     stream_id = get_in(state, [:pid_to_stream_id, pid])
     is_audio? = is_audio_stream_id?(stream_id)
     {pes, state} = pes_buffers(pid, buffer, state)
 
-    {buffers, state} = {pes, state}
+    # If this buffer is not on the PCR PID and the gap since the last PCR exceeds
+    # ~100ms, inject a PCR-only packet before the payload to keep PCR continuous.
+    {buffers, state} =
+      if state.pmt.pcr_pid && pid != state.pmt.pcr_pid do
+        ts_raw = Membrane.Buffer.get_dts_or_pts(buffer)
+        ts = if ts_raw, do: ts_raw - state.time_base_ns, else: nil
+        gap = if state.pcr_last_time, do: ts - state.pcr_last_time, else: nil
+
+        if ts && (is_nil(gap) or gap >= Membrane.Time.milliseconds(100)) do
+          {pcr_buf, state} = pcr_only_buffer(ts, state)
+          state = put_in(state, [:pcr_last_time], ts)
+          {List.wrap(pcr_buf) ++ pes, state}
+        else
+          {pes, state}
+        end
+      else
+        {pes, state}
+      end
 
     {buffers, state} =
       if is_keyframe? or not state.pat_written? do
@@ -264,7 +291,14 @@ defmodule Membrane.MPEG.TS.Muxer do
     {buffers, state}
   end
 
-  # PCR-only packets not used; PCR is inserted alongside PES payload.
+  # Build a PCR-only packet on the PCR PID using the provided relative time (ns).
+  def pcr_only_buffer(time_ns, state) do
+    pcr = marshal_pcr(time_ns)
+
+    <<>>
+    |> marshal_ts(state.pmt.pcr_pid, state, pcr: pcr)
+    |> then(fn {packets, state} -> {packet_to_buffer(packets), state} end)
+  end
 
   def pmt_buffer(state) do
     state.pmt
@@ -288,7 +322,12 @@ defmodule Membrane.MPEG.TS.Muxer do
 
     opts_base = [rai: if(is_keyframe? or is_audio?, do: 1, else: 0)]
 
-    pcr_time_ns = Membrane.Buffer.get_dts_or_pts(buffer)
+    # Use relative media time for PCR and PTS/DTS
+    pcr_time_ns =
+      case Membrane.Buffer.get_dts_or_pts(buffer) do
+        nil -> nil
+        ts -> ts - (state.time_base_ns || 0)
+      end
 
     opts =
       if pid == state.pmt.pcr_pid and pcr_time_ns != nil do
@@ -297,13 +336,32 @@ defmodule Membrane.MPEG.TS.Muxer do
         opts_base
       end
 
-    buffer
-    |> update_in([Access.key!(:dts)], fn dts ->
-      unless is_audio?, do: dts
-    end)
-    |> marshal_pes(stream_id)
-    |> marshal_ts(pid, state, opts)
-    |> then(fn {packets, state} -> {packet_to_buffer(packets), state} end)
+    # Rebase PTS/DTS in PES to match PCR base
+    buffer_for_pes =
+      buffer
+      |> Map.update!(:pts, fn
+        nil -> nil
+        pts -> pts - (state.time_base_ns || 0)
+      end)
+      |> Map.update!(:dts, fn
+        nil ->
+          nil
+
+        dts ->
+          # Keep DTS for video; audio typically uses PTS only
+          if is_audio?, do: nil, else: dts - (state.time_base_ns || 0)
+      end)
+
+    payload = marshal_pes(buffer_for_pes, stream_id)
+
+    {packets, state} = marshal_ts(payload, pid, state, opts)
+
+    state =
+      if Keyword.has_key?(opts, :pcr),
+        do: put_in(state, [:pcr_last_time], pcr_time_ns),
+        else: state
+
+    {packet_to_buffer(packets), state}
   end
 
   def marshal_ts(payload, pid, state, opts \\ []) do

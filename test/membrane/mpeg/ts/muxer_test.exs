@@ -5,7 +5,7 @@ defmodule Membrane.MPEG.TS.MuxerTest do
   require Membrane.Pad
   alias Membrane.MPEG.TS
 
-  @input "test/fixtures/avsync.ts"
+  @input "test/fixtures/avsync-without-sei.ts"
 
   @tag :tmp_dir
   test "muxes h264 into segments", %{tmp_dir: tmp_dir} do
