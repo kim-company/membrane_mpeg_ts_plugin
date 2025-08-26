@@ -605,7 +605,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   defp marshal_timestamp(prefix, ts) when prefix in 0x1..0x3 do
-    ts = div(ts * 90_000, 1_000_000_000)
+    ts = round(ts * 90_000 / 1_000_000_000)
 
     import Bitwise
     # Extract bits
