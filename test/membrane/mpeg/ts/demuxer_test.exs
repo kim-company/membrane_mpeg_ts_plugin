@@ -1,5 +1,5 @@
 defmodule Membrane.MPEG.TS.DemuxerTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
 
   import Membrane.Testing.Assertions
   import Membrane.ChildrenSpec
@@ -83,6 +83,30 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     :ok = Testing.Pipeline.terminate(pid)
 
     assert_files_equal(h264_out, "test/data/avsync.h264")
+  end
+
+  @tag :tmp_dir
+  test "demuxes audio from avsync specifing its stream type", %{tmp_dir: tmp_dir} do
+    aac_out = Path.join(tmp_dir, "output.aac")
+
+    spec = [
+      child(:source, %Membrane.File.Source{
+        location: "test/data/avsync.ts"
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :AAC_ADTS])
+      |> child({:sink, :aac}, %Membrane.File.Sink{
+        location: aac_out
+      })
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pid, :demuxer, {:pmt, %MPEG.TS.PMT{}})
+    assert_end_of_stream(pid, {:sink, :aac}, :input)
+    :ok = Testing.Pipeline.terminate(pid)
+
+    assert_files_equal(aac_out, "test/data/avsync.aac")
   end
 
   defp assert_files_equal(file_a, file_b) do
