@@ -6,7 +6,7 @@ defmodule Membrane.MPEG.TS.DiscontinuityHandlingTest do
   import Membrane.Testing.Assertions
   require Membrane.Pad, as: Pad
 
-  @input_ts_file "test/fixtures/bundestag/all.ts"
+  @input_ts_file "test/data/avsync.ts"
 
   defmodule TestingSink do
     use Membrane.Sink
