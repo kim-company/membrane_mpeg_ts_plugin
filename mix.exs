@@ -4,7 +4,7 @@ defmodule Membrane.MPEG.TS.MixProject do
   def project do
     [
       app: :membrane_mpeg_ts_plugin,
-      version: "1.3.4",
+      version: "2.0.0",
       elixir: "~> 1.13",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -41,7 +41,8 @@ defmodule Membrane.MPEG.TS.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:mpeg_ts, "~> 2.0"},
+      # {:mpeg_ts, "~> 2.0"},
+      {:mpeg_ts, path: "../mpeg_ts"},
       {:crc, "~> 0.10"},
       {:membrane_core, "~> 1.0"},
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
