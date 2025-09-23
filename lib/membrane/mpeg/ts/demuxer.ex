@@ -77,6 +77,17 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
+  def handle_pad_removed(pad, _ctx, state) do
+    state
+    |> update_in([:subscribers], &Map.delete(&1, pad))
+    |> update_in([:pid_to_pads], fn mapping ->
+      mapping
+      |> Enum.map(fn {pid, pads} -> {pid, Enum.filter(pads, fn x -> x != pad end)} end)
+      |> Map.new()
+    end)
+  end
+
+  @impl true
   def handle_buffer(:input, buffer, ctx, state) do
     {units, state} =
       get_and_update_in(state, [:demuxer], fn demuxer ->
