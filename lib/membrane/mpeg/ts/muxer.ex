@@ -148,6 +148,9 @@ defmodule Membrane.MPEG.TS.Muxer do
     {[buffer: {:output, buffers}, end_of_stream: :output], state}
   end
 
+  defp ns_to_ts(nil), do: nil
+  defp ns_to_ts(ns), do: round(ns * 90_000 / 1.0e9)
+
   defp mux_and_forward(pid, buffer, state) do
     # Isn't there a better way of doinf it?
     %{stream_type: stream_type} = state.muxer.pmt.streams[pid]
@@ -158,8 +161,8 @@ defmodule Membrane.MPEG.TS.Muxer do
       get_and_update_in(state, [:muxer], fn muxer ->
         case stream_type do
           x when x in [:video, :audio] ->
-            TS.Muxer.mux_sample(muxer, pid, buffer.payload, buffer.pts,
-              dts: buffer.dts,
+            TS.Muxer.mux_sample(muxer, pid, buffer.payload, ns_to_ts(buffer.pts),
+              dts: ns_to_ts(buffer.dts),
               sync?: sync?
             )
 
