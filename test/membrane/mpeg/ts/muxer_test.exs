@@ -14,15 +14,14 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       |> child(:demuxer, TS.Demuxer),
       get_child(:demuxer)
       |> via_out(:output, options: [pid: 0x100])
-      |> child(:parser, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+      |> child({:h264, :parser}, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
       |> via_in(:input, options: [stream_type: :H264_AVC])
       |> get_child(:muxer),
-      # TODO: AAC
-      # get_child(:demuxer)
-      # |> via_out(:output, pad_options: [pid: 0x101])
-      # |> child(:parser, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
-      # |> via_in(:input, pad_options: [stream_type: :H264_AAC])
-      # get_child(:muxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x101])
+      |> child({:aac, :parser}, %Membrane.AAC.Parser{})
+      |> via_in(:input, options: [stream_type: :AAC_ADTS])
+      |> get_child(:muxer),
       child(:muxer, Membrane.MPEG.TS.Muxer)
       |> child(:sink, %Membrane.File.Sink{
         location: Path.join(tmp_dir, "output.ts")

@@ -13,7 +13,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   alias MPEG.TS
 
   def_input_pad(:input,
-    accepted_format: %Membrane.RemoteStream{},
+    accepted_format: _any,
     availability: :on_request,
     options: [
       stream_type: [
@@ -38,6 +38,11 @@ defmodule Membrane.MPEG.TS.Muxer do
       pid_to_queue: %{}
     }
 
+    {[], state}
+  end
+
+  @impl true
+  def handle_stream_format(_pad, _format, _ctx, state) do
     {[], state}
   end
 
