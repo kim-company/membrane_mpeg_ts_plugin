@@ -41,8 +41,7 @@ defmodule Membrane.MPEG.TS.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      # {:mpeg_ts, "~> 2.0"},
-      {:mpeg_ts, path: "../mpeg_ts"},
+      {:mpeg_ts, "~> 3.0"},
       {:crc, "~> 0.10"},
       {:membrane_core, "~> 1.0"},
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
