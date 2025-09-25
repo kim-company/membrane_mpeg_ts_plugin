@@ -42,8 +42,8 @@ defmodule Membrane.MPEG.TS.MixProject do
   defp deps do
     [
       {:mpeg_ts, "~> 3.0"},
-      {:crc, "~> 0.10"},
       {:membrane_core, "~> 1.0"},
+      {:membrane_timestamp_queue, "~> 0.2.2"},
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
       {:membrane_nalu_plugin, "~> 0.1", only: :test},
       {:membrane_aac_plugin, "~> 0.19.1", only: :test},

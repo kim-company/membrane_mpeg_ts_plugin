@@ -11,6 +11,9 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   use Membrane.Filter
   alias MPEG.TS
+  alias Membrane.TimestampQueue
+
+  @queue_buffer Membrane.Time.milliseconds(200)
 
   def_input_pad(:input,
     accepted_format: _any,
@@ -32,10 +35,16 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   @impl true
   def handle_init(_ctx, _opts) do
+    queue =
+      TimestampQueue.new(
+        pause_demand_boundary: {:time, @queue_buffer},
+        synchronization_strategy: :explicit_offsets
+      )
+
     state = %{
       muxer: TS.Muxer.new(),
-      pad_to_pid: %{},
-      pid_to_queue: %{}
+      pad_to_stream: %{},
+      queue: queue
     }
 
     {[], state}
@@ -55,33 +64,28 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   @impl true
-  def handle_end_of_stream({Membrane.Pad, :input, ref}, ctx, state) do
-    end_of_stream? =
-      ctx.pads
-      |> Enum.map(fn {_ref, pad} -> pad end)
-      |> Enum.filter(fn pad -> pad.direction == :input end)
-      |> Enum.map(fn pad -> pad.end_of_stream? or pad == ref end)
-      |> Enum.all?()
-
-    if end_of_stream? do
-      mux_and_forward_end_of_stream(state)
-    else
-      {[], state}
-    end
+  def handle_end_of_stream(pad, _ctx, state) do
+    state.queue
+    |> TimestampQueue.push_end_of_stream(pad)
+    |> TimestampQueue.pop_available_items()
+    |> handle_queue_output(state)
   end
 
   @impl true
   def handle_pad_added(pad, ctx, state) do
+    stream_type = ctx.pad_options[:stream_type]
+    stream_category = TS.PMT.get_stream_category(stream_type)
+
     {pid, state} =
       get_and_update_in(state, [:muxer], fn muxer ->
         # TODO: we could indicated this stream as PCR carrier if needed.
-        TS.Muxer.add_elementary_stream(muxer, ctx.pad_options[:stream_type])
+        TS.Muxer.add_elementary_stream(muxer, stream_type)
       end)
 
     state =
       state
-      |> put_in([:pad_to_pid, pad], pid)
-      |> put_in([:pid_to_queue, pid], :queue.new())
+      |> put_in([:pad_to_stream, pad], %{pid: pid, type: stream_type, category: stream_category})
+      |> update_in([:queue], &TimestampQueue.register_pad(&1, pad))
 
     if ctx.playback == :playing do
       # Each time a pad is added at runtime, update the PMT.
@@ -93,108 +97,103 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   @impl true
   def handle_buffer(pad, buffer, _ctx, state) do
-    pid = get_in(state, [:pad_to_pid, pad])
-
-    state
-    |> update_in([:pid_to_queue, pid], fn q -> :queue.in(buffer, q) end)
-    |> mux_and_forward_oldest([])
+    state.queue
+    |> TimestampQueue.push_buffer_and_pop_available_items(pad, buffer)
+    |> handle_queue_output(state)
   end
 
-  defp mux_and_forward_oldest(state, acc) do
-    any_empty? =
-      state.pid_to_queue
-      |> Enum.map(fn {_, q} -> :queue.is_empty(q) end)
-      |> Enum.any?()
+  defp handle_queue_output({suggested_actions, items, queue}, state) do
+    state = %{state | queue: queue}
+    {actions, state} = Enum.flat_map_reduce(items, state, &handle_queue_item/2)
+    {suggested_actions ++ actions ++ maybe_end_of_stream(state), state}
+  end
 
-    if any_empty? do
-      {[buffer: {:output, acc}], state}
+  defp handle_queue_item({pad, {:buffer, buffer}}, state) do
+    stream = get_in(state, [:pad_to_stream, pad])
+
+    {packet_or_packets, state} =
+      get_and_update_in(state, [:muxer], fn muxer ->
+        case stream.category do
+          :video ->
+            is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
+
+            {packets, muxer} =
+              TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, ns_to_ts(buffer.pts),
+                dts: ns_to_ts(buffer.dts),
+                sync?: is_keyframe?
+              )
+
+            if is_keyframe? do
+              {pat, muxer} = TS.Muxer.mux_pat(muxer)
+              {pmt, muxer} = TS.Muxer.mux_pmt(muxer)
+              {[pat, pmt] ++ packets, muxer}
+            else
+              {packets, muxer}
+            end
+
+          :audio ->
+            TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, ns_to_ts(buffer.pts),
+              sync?: true
+            )
+
+          _ ->
+            psi = get_in(buffer, [Access.key!(:metadata), :psi])
+
+            if psi != nil do
+              TS.Muxer.mux_psi(muxer, stream.pid, psi)
+            else
+              Membrane.Logger.warning(
+                "Could not mux packet on stream #{inspect(stream)}: expected buffer.metadata.psi"
+              )
+
+              {[], muxer}
+            end
+        end
+      end)
+
+    buffers =
+      packet_or_packets
+      |> List.wrap()
+      |> Enum.map(fn x ->
+        {pts, dts} = if x.pusi, do: {buffer.pts, buffer.dts}, else: {nil, nil}
+
+        %Membrane.Buffer{
+          payload: marshal_payload(x),
+          pts: pts,
+          dts: dts,
+          metadata: extract_metadata(x)
+        }
+      end)
+
+    {[buffer: {:output, buffers}], state}
+  end
+
+  defp handle_queue_item(_, state), do: {[], state}
+
+  defp maybe_end_of_stream(state) do
+    if TimestampQueue.pads(state.queue) |> MapSet.size() == 0 do
+      [end_of_stream: :output]
     else
-      # Find the queue containing the oldest item.
-      {next_pid, _} =
-        state.pid_to_queue
-        |> Enum.map(fn {pid, q} ->
-          {:value, x} = :queue.peek(q)
-          {pid, x.pts}
-        end)
-        |> Enum.sort(fn {_, left}, {_, right} -> left < right end)
-        |> List.first()
-
-      {{:value, buffer}, state} =
-        get_and_update_in(state, [:pid_to_queue, next_pid], fn q -> :queue.out(q) end)
-
-      {buffers, state} = mux_and_forward(next_pid, buffer, state)
-      mux_and_forward_oldest(state, acc ++ buffers)
+      []
     end
-  end
-
-  defp mux_and_forward_end_of_stream(state) do
-    {buffers, state} =
-      state.pid_to_queue
-      |> Enum.flat_map(fn {pid, queue} ->
-        queue
-        |> :queue.to_list()
-        |> Enum.map(fn buffer -> {pid, buffer} end)
-      end)
-      |> Enum.sort(fn {_, left}, {_, right} ->
-        Membrane.Buffer.get_dts_or_pts(left) < Membrane.Buffer.get_dts_or_pts(right)
-      end)
-      |> Enum.flat_map_reduce(state, fn {pid, buffer}, state ->
-        mux_and_forward(pid, buffer, state)
-      end)
-
-    state =
-      update_in(state, [:pid_to_queue], fn m ->
-        m
-        |> Enum.map(fn {pid, _queue} -> {pid, :queue.new()} end)
-        |> Map.new()
-      end)
-
-    {[buffer: {:output, buffers}, end_of_stream: :output], state}
   end
 
   defp ns_to_ts(nil), do: nil
   defp ns_to_ts(ns), do: round(ns * 90_000 / 1.0e9)
 
-  defp mux_and_forward(pid, buffer, state) do
-    # Isn't there a better way of doinf it?
-    %{stream_type: stream_type} = state.muxer.pmt.streams[pid]
-    stream_category = TS.PMT.get_stream_category(stream_type)
+  defp marshal_payload(packet) do
+    packet
+    |> TS.Marshaler.marshal()
+    |> IO.iodata_to_binary()
+  end
 
-    keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
-    sync? = keyframe? || stream_category != :video
-
-    {packets, state} =
-      get_and_update_in(state, [:muxer], fn muxer ->
-        case stream_category do
-          x when x in [:video, :audio] ->
-            TS.Muxer.mux_sample(muxer, pid, buffer.payload, ns_to_ts(buffer.pts),
-              dts: ns_to_ts(buffer.dts),
-              sync?: sync?
-            )
-
-            # TODO: support PSI packets such as SCTE
-        end
-      end)
-
-    buffers =
-      packets
-      |> Enum.map(&TS.Marshaler.marshal/1)
-      |> Enum.map(&IO.iodata_to_binary/1)
-      |> Enum.map(fn x ->
-        %Membrane.Buffer{payload: x, pts: buffer.pts, dts: buffer.dts}
-      end)
-      |> then(fn
-        [] ->
-          []
-
-        [h | t] ->
-          h
-          |> put_in([Access.key!(:metadata), :pusi], sync?)
-          |> List.wrap()
-          |> Enum.concat(t)
-      end)
-
-    {buffers, state}
+  defp extract_metadata(packet) do
+    %{
+      pusi: packet.pusi,
+      pid: packet.pid,
+      rai: packet.random_access_indicator,
+      pid_class: packet.pid_class
+    }
   end
 
   defp mux_pat_pmt(state) do
@@ -202,12 +201,10 @@ defmodule Membrane.MPEG.TS.Muxer do
     {pmt, state} = get_and_update_in(state, [:muxer], &TS.Muxer.mux_pmt(&1))
 
     buffers =
-      [pat, pmt]
-      |> Enum.map(&TS.Marshaler.marshal/1)
-      |> Enum.map(&IO.iodata_to_binary/1)
-      |> Enum.map(fn x -> %Membrane.Buffer{payload: x} end)
+      Enum.map([pat, pmt], fn x ->
+        %Membrane.Buffer{payload: marshal_payload(x), metadata: extract_metadata(x)}
+      end)
 
-    actions = [buffer: {:output, buffers}]
-    {actions, state}
+    {[buffer: {:output, buffers}], state}
   end
 end
