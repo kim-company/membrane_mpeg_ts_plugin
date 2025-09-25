@@ -11,6 +11,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   require Logger
 
   alias MPEG.TS
+  alias MPEG.TS.Demuxer.Container
 
   def_input_pad(:input,
     accepted_format: %Membrane.RemoteStream{},
@@ -123,22 +124,29 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {actions, state}
   end
 
-  defp handle_demuxed(%{payload: pmt = %TS.PMT{}}, _ctx, state) do
-    actions = [notify_parent: {:pmt, pmt}]
-    state = refresh_pid_to_pad(state)
+  defp handle_demuxed(%Container{payload: %TS.PSI{table_type: type, table: table}}, _ctx, state)
+       when type in [:pmt, :pat] do
+    actions = [notify_parent: {type, table}]
+    state = if type == :pmt, do: refresh_pid_to_pad(state), else: state
     {actions, state}
   end
 
-  defp handle_demuxed(%{pid: pid, payload: payload}, ctx, state) do
+  defp handle_demuxed(unit = %Container{pid: pid}, ctx, state) do
     pads = get_in(state, [:pid_to_pads, pid]) || []
-    buffer = ts_unit_to_buffer(payload)
+    buffer = ts_unit_to_buffer(unit)
+    discontinue? = get_in(buffer, [Access.key!(:metadata), Access.key(:discontinuity, false)])
 
     format_actions =
       pads
       |> Enum.filter(fn pad -> ctx.pads[pad].stream_format == nil end)
       |> Enum.map(fn pad -> {:stream_format, {pad, %Membrane.RemoteStream{}}} end)
 
-    actions = Enum.map(pads, fn pad -> {:buffer, {pad, buffer}} end)
+    actions =
+      Enum.flat_map(pads, fn pad ->
+        extras = if discontinue?, do: [{:event, {pad, %Membrane.Event.Discontinuity{}}}], else: []
+        extras ++ [{:buffer, {pad, buffer}}]
+      end)
+
     {format_actions ++ actions, state}
   end
 
@@ -191,7 +199,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
     |> put_in([:subscribers, pad, :bound], true)
   end
 
-  defp ts_unit_to_buffer(x = %TS.PES{}) do
+  defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}}) do
     %Membrane.Buffer{
       payload: x.data,
       pts: x.pts,
@@ -204,12 +212,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
     }
   end
 
-  defp ts_unit_to_buffer(x = %TS.PSI{}) do
+  defp ts_unit_to_buffer(%Container{payload: x = %TS.PSI{}, t: best_effort_t}) do
     %Membrane.Buffer{
-      payload: x.table,
-      metadata: %{header: x.header}
+      payload: TS.Marshaler.marshal(x),
+      pts: best_effort_t,
+      metadata: %{psi: x}
     }
   end
-
-  defp ts_unit_to_buffer(_), do: []
 end
