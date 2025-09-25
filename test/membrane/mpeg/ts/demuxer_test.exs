@@ -109,6 +109,35 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     assert_files_equal(aac_out, "test/data/avsync.aac")
   end
 
+  test "demuxes SCTE35 data" do
+    spec = [
+      child(:source, %Membrane.File.Source{
+        location: "test/data/scte35.ts"
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :SCTE_35_SPLICE])
+      |> child(:sink, Membrane.Testing.Sink)
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_sink_buffer(
+      pid,
+      :sink,
+      %Membrane.Buffer{
+        payload:
+          <<0, 252, 48, 37, 0, 0, 0, 0, 0, 0, 0, 255, 240, 20, 5, 0, 0, 0, 100, 127, 239, 254, 0,
+            82, 101, 192, 126, 0, 82, 101, 192, 0, 1, 18, 255, 0, 0, 93, 125, 122, 192>>,
+        pts: 60_000_000_000,
+        metadata: %{psi: %{table_type: :scte35, table: %MPEG.TS.SCTE35{}}}
+      }
+    )
+
+    assert_end_of_stream(pid, :sink, :input)
+    :ok = Testing.Pipeline.terminate(pid)
+  end
+
   defp assert_files_equal(file_a, file_b) do
     assert {:ok, a} = File.read(file_a)
     assert {:ok, b} = File.read(file_b)

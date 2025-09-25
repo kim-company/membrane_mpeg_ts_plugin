@@ -75,8 +75,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     {pid, state} =
       get_and_update_in(state, [:muxer], fn muxer ->
         # TODO: we could indicated this stream as PCR carrier if needed.
-        stream_type = TS.PMT.encode_stream_type(ctx.pad_options[:stream_type])
-        TS.Muxer.add_elementary_stream(muxer, stream_type)
+        TS.Muxer.add_elementary_stream(muxer, ctx.pad_options[:stream_type])
       end)
 
     state =
@@ -159,12 +158,14 @@ defmodule Membrane.MPEG.TS.Muxer do
   defp mux_and_forward(pid, buffer, state) do
     # Isn't there a better way of doinf it?
     %{stream_type: stream_type} = state.muxer.pmt.streams[pid]
+    stream_category = TS.PMT.get_stream_category(stream_type)
+
     keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
-    sync? = keyframe? || stream_type != :video
+    sync? = keyframe? || stream_category != :video
 
     {packets, state} =
       get_and_update_in(state, [:muxer], fn muxer ->
-        case stream_type do
+        case stream_category do
           x when x in [:video, :audio] ->
             TS.Muxer.mux_sample(muxer, pid, buffer.payload, ns_to_ts(buffer.pts),
               dts: ns_to_ts(buffer.dts),

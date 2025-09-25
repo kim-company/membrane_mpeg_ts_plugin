@@ -202,8 +202,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
   defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}}) do
     %Membrane.Buffer{
       payload: x.data,
-      pts: x.pts,
-      dts: x.dts,
+      pts: ts_to_ns(x.pts),
+      dts: ts_to_ns(x.dts),
       metadata: %{
         stream_id: x.stream_id,
         is_aligned: x.is_aligned,
@@ -215,8 +215,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
   defp ts_unit_to_buffer(%Container{payload: x = %TS.PSI{}, t: best_effort_t}) do
     %Membrane.Buffer{
       payload: TS.Marshaler.marshal(x),
-      pts: best_effort_t,
+      pts: ts_to_ns(best_effort_t),
       metadata: %{psi: x}
     }
   end
+
+  defp ts_to_ns(t), do: round(t * 1.0e9 / 90_000)
 end
