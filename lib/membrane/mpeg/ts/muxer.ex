@@ -118,8 +118,8 @@ defmodule Membrane.MPEG.TS.Muxer do
             is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
 
             {packets, muxer} =
-              TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, ns_to_ts(buffer.pts),
-                dts: ns_to_ts(buffer.dts),
+              TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts,
+                dts: buffer.dts,
                 sync?: is_keyframe?
               )
 
@@ -132,9 +132,7 @@ defmodule Membrane.MPEG.TS.Muxer do
             end
 
           :audio ->
-            TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, ns_to_ts(buffer.pts),
-              sync?: true
-            )
+            TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts, sync?: true)
 
           _ ->
             psi = get_in(buffer, [Access.key!(:metadata), :psi])
@@ -177,9 +175,6 @@ defmodule Membrane.MPEG.TS.Muxer do
       []
     end
   end
-
-  defp ns_to_ts(nil), do: nil
-  defp ns_to_ts(ns), do: round(ns * 90_000 / 1.0e9)
 
   defp marshal_payload(packet) do
     packet
