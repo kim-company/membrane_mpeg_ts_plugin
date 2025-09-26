@@ -152,12 +152,10 @@ defmodule Membrane.MPEG.TS.Muxer do
       packet_or_packets
       |> List.wrap()
       |> Enum.map(fn x ->
-        {pts, dts} = if x.pusi, do: {buffer.pts, buffer.dts}, else: {nil, nil}
-
         %Membrane.Buffer{
           payload: marshal_payload(x),
-          pts: pts,
-          dts: dts,
+          pts: buffer.pts,
+          dts: buffer.dts,
           metadata: extract_metadata(x)
         }
       end)
