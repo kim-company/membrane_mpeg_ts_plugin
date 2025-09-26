@@ -68,6 +68,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
   end
 
   @impl true
+  def handle_stream_format(_pad, _format, _ctx, state) do
+    {[], state}
+  end
+
+  @impl true
   def handle_pad_added(pad, ctx, state) do
     state =
       state
@@ -139,7 +144,18 @@ defmodule Membrane.MPEG.TS.Demuxer do
     format_actions =
       pads
       |> Enum.filter(fn pad -> ctx.pads[pad].stream_format == nil end)
-      |> Enum.map(fn pad -> {:stream_format, {pad, %Membrane.RemoteStream{}}} end)
+      |> Enum.map(fn pad ->
+        stream =
+          state.demuxer
+          |> TS.Demuxer.available_streams()
+          |> Map.fetch!(pid)
+
+        format = %Membrane.RemoteStream{
+          content_format: %TS.StreamFormat{stream_type: stream.stream_type}
+        }
+
+        {:stream_format, {pad, format}}
+      end)
 
     actions =
       Enum.flat_map(pads, fn pad ->

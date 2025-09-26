@@ -20,7 +20,8 @@ defmodule Membrane.MPEG.TS.Muxer do
     availability: :on_request,
     options: [
       stream_type: [
-        spec: atom(),
+        spec: atom() | nil,
+        default: nil,
         description: """
         Each input is going to become a stream in the PMT with this assigned type.
         See MPEG.TS.PMT.
@@ -51,8 +52,24 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   @impl true
-  def handle_stream_format(_pad, _format, _ctx, state) do
+  def handle_stream_format(
+        pad,
+        %Membrane.RemoteStream{content_format: %TS.StreamFormat{stream_type: stream_type}},
+        ctx,
+        state
+      ) do
+    handle_stream(pad, stream_type, ctx, state)
+  end
+
+  def handle_stream_format(pad, _format, _ctx, state) when is_map_key(state.pad_to_stream, pad) do
     {[], state}
+  end
+
+  def handle_stream_format(pad, _format, _ctx, _state) do
+    raise RuntimeError, """
+    Pad #{inspect(pad)} did not specify its stream_type neither with pad_options
+    not with stream_format.
+    """
   end
 
   @impl true
@@ -74,25 +91,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   @impl true
   def handle_pad_added(pad, ctx, state) do
     stream_type = ctx.pad_options[:stream_type]
-    stream_category = TS.PMT.get_stream_category(stream_type)
-
-    {pid, state} =
-      get_and_update_in(state, [:muxer], fn muxer ->
-        # TODO: we could indicated this stream as PCR carrier if needed.
-        TS.Muxer.add_elementary_stream(muxer, stream_type)
-      end)
-
-    state =
-      state
-      |> put_in([:pad_to_stream, pad], %{pid: pid, type: stream_type, category: stream_category})
-      |> update_in([:queue], &TimestampQueue.register_pad(&1, pad))
-
-    if ctx.playback == :playing do
-      # Each time a pad is added at runtime, update the PMT.
-      mux_pat_pmt(state)
-    else
-      {[], state}
-    end
+    handle_stream(pad, stream_type, ctx, state)
   end
 
   @impl true
@@ -167,6 +166,35 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   defp handle_queue_item(_, state), do: {[], state}
+
+  # We have to stream_type information, we'll wait for the stream_format event.
+  defp handle_stream(_pad, nil, _ctx, state), do: {[], state}
+
+  # The stream has already been added.
+  defp handle_stream(pad, _stream_format, _ctx, state) when is_map_key(state.pad_to_stream, pad),
+    do: {[], state}
+
+  defp handle_stream(pad, stream_type, ctx, state) do
+    stream_category = TS.PMT.get_stream_category(stream_type)
+
+    {pid, state} =
+      get_and_update_in(state, [:muxer], fn muxer ->
+        # TODO: we could indicated this stream as PCR carrier if needed.
+        TS.Muxer.add_elementary_stream(muxer, stream_type)
+      end)
+
+    state =
+      state
+      |> put_in([:pad_to_stream, pad], %{pid: pid, type: stream_type, category: stream_category})
+      |> update_in([:queue], &TimestampQueue.register_pad(&1, pad))
+
+    if ctx.playback == :playing do
+      # Each time a pad is added at runtime, update the PMT.
+      mux_pat_pmt(state)
+    else
+      {[], state}
+    end
+  end
 
   defp maybe_end_of_stream(state) do
     if TimestampQueue.pads(state.queue) |> MapSet.size() == 0 do

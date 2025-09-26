@@ -33,6 +33,27 @@ defmodule Membrane.MPEG.TS.MuxerTest do
   end
 
   @tag :tmp_dir
+  test "re-muxes avsync video, w/o specifying the stream_type", %{tmp_dir: tmp_dir} do
+    spec = [
+      child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+      |> child(:demuxer, TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x100])
+      |> via_in(:input)
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Membrane.File.Sink{
+        location: Path.join(tmp_dir, "output.ts")
+      })
+    ]
+
+    pid = Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, :sink)
+
+    :ok = Membrane.Pipeline.terminate(pid)
+  end
+
+  @tag :tmp_dir
   test "re-muxes scte", %{tmp_dir: tmp_dir} do
     output_path = Path.join(tmp_dir, "output.ts")
 

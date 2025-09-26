@@ -5,6 +5,34 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
   import Membrane.ChildrenSpec
   alias Membrane.Testing
 
+  test "content_format contains the correct format" do
+    spec = [
+      child(:source, %Membrane.File.Source{
+        location: "test/data/avsync.ts"
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x100])
+      |> child({:sink, :h264}, %Membrane.Testing.Sink{}),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x101])
+      |> child({:sink, :aac}, %Membrane.Testing.Sink{})
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, {:sink, :h264}, :input)
+    assert_end_of_stream(pid, {:sink, :aac}, :input)
+    :ok = Membrane.Pipeline.terminate(pid)
+
+    assert_sink_stream_format(pid, {:sink, :h264}, %Membrane.RemoteStream{
+      content_format: %MPEG.TS.StreamFormat{stream_type: :H264_AVC}
+    })
+
+    assert_sink_stream_format(pid, {:sink, :aac}, %Membrane.RemoteStream{
+      content_format: %MPEG.TS.StreamFormat{stream_type: :AAC_ADTS}
+    })
+  end
+
   @tag :tmp_dir
   test "demuxes avsync specifying PIDs", %{tmp_dir: tmp_dir} do
     aac_out = Path.join(tmp_dir, "output.aac")
