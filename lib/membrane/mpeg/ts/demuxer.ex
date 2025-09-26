@@ -79,7 +79,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
       |> put_in([:subscribers, pad], %{opts: ctx.pad_options, bound: false})
       |> refresh_pid_to_pad()
 
-    {[], state}
+    if ctx.playback == :playing do
+      maybe_forward_stream_format(ctx, state)
+    else
+      {[], state}
+    end
   end
 
   @impl true
@@ -129,33 +133,18 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {actions, state}
   end
 
-  defp handle_demuxed(%Container{payload: %TS.PSI{table_type: type, table: table}}, _ctx, state)
+  defp handle_demuxed(%Container{payload: %TS.PSI{table_type: type, table: table}}, ctx, state)
        when type in [:pmt, :pat] do
     actions = [notify_parent: {type, table}]
     state = if type == :pmt, do: refresh_pid_to_pad(state), else: state
-    {actions, state}
+    {format_actions, state} = maybe_forward_stream_format(ctx, state)
+    {actions ++ format_actions, state}
   end
 
-  defp handle_demuxed(unit = %Container{pid: pid}, ctx, state) do
-    pads = get_in(state, [:pid_to_pads, pid]) || []
+  defp handle_demuxed(unit = %Container{pid: pid}, _ctx, state) do
+    pads = get_in(state, [:pid_to_pads, Access.key(pid, [])])
     buffer = ts_unit_to_buffer(unit)
     discontinue? = get_in(buffer, [Access.key!(:metadata), Access.key(:discontinuity, false)])
-
-    format_actions =
-      pads
-      |> Enum.filter(fn pad -> ctx.pads[pad].stream_format == nil end)
-      |> Enum.map(fn pad ->
-        stream =
-          state.demuxer
-          |> TS.Demuxer.available_streams()
-          |> Map.fetch!(pid)
-
-        format = %Membrane.RemoteStream{
-          content_format: %TS.StreamFormat{stream_type: stream.stream_type}
-        }
-
-        {:stream_format, {pad, format}}
-      end)
 
     actions =
       Enum.flat_map(pads, fn pad ->
@@ -163,7 +152,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
         extras ++ [{:buffer, {pad, buffer}}]
       end)
 
-    {format_actions ++ actions, state}
+    {actions, state}
   end
 
   defp refresh_pid_to_pad(state) do
@@ -213,6 +202,29 @@ defmodule Membrane.MPEG.TS.Demuxer do
       acc -> [pad | acc]
     end)
     |> put_in([:subscribers, pad, :bound], true)
+  end
+
+  defp maybe_forward_stream_format(ctx, state) do
+    actions =
+      state.pid_to_pads
+      |> Enum.flat_map(fn {pid, pads} ->
+        pads
+        |> Enum.filter(fn pad -> ctx.pads[pad].stream_format == nil end)
+        |> Enum.map(fn pad ->
+          stream =
+            state.demuxer
+            |> TS.Demuxer.available_streams()
+            |> Map.fetch!(pid)
+
+          format = %Membrane.RemoteStream{
+            content_format: %TS.StreamFormat{stream_type: stream.stream_type}
+          }
+
+          {:stream_format, {pad, format}}
+        end)
+      end)
+
+    {actions, state}
   end
 
   defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}}) do
