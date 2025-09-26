@@ -181,6 +181,8 @@ defmodule Membrane.MPEG.TS.Muxer do
         TS.Muxer.add_elementary_stream(muxer, stream_type)
       end)
 
+    Membrane.Logger.info("Binding #{inspect(pad)} to #{pid} (#{inspect(stream_type)})")
+
     state =
       state
       |> put_in([:pad_to_stream, pad], %{pid: pid, type: stream_type, category: stream_category})

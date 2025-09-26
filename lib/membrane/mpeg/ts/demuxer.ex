@@ -205,7 +205,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   defp bind(pad, pid, state) do
     avail = TS.Demuxer.available_streams(state.demuxer)
     info = Map.fetch!(avail, pid)
-    Membrane.Logger.info("Binding #{inspect(pad)} to #{pid} (#{inspect(info)})")
+    Membrane.Logger.info("Binding #{inspect(pad)} to #{pid} (#{inspect(info.stream_type)})")
 
     state
     |> update_in([:pid_to_pads, pid], fn
