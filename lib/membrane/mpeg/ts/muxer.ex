@@ -26,6 +26,11 @@ defmodule Membrane.MPEG.TS.Muxer do
         Each input is going to become a stream in the PMT with this assigned type.
         See MPEG.TS.PMT.
         """
+      ],
+      wait_on_buffers?: [
+        spec: boolean(),
+        default: true,
+        description: "Block muxer until a buffer on this pad arrives."
       ]
     ]
   )
@@ -39,7 +44,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     queue =
       TimestampQueue.new(
         pause_demand_boundary: {:time, @queue_buffer},
-        synchronization_strategy: :explicit_offsets
+        synchronization_strategy: :synchronize_on_arrival
       )
 
     state = %{
@@ -99,6 +104,19 @@ defmodule Membrane.MPEG.TS.Muxer do
     state.queue
     |> TimestampQueue.push_buffer_and_pop_available_items(pad, buffer)
     |> handle_queue_output(state)
+    |> unblock_awaiting_pads()
+  end
+
+  defp unblock_awaiting_pads({actions, state}) do
+    state =
+      update_in(state, [:queue, :awaiting_pads], fn pads ->
+        Enum.filter(pads, fn pad ->
+          stream = get_in(state, [:pad_to_stream, pad])
+          stream[:wait_on_buffers?]
+        end)
+      end)
+
+    {actions, state}
   end
 
   defp handle_queue_output({suggested_actions, items, queue}, state) do
@@ -174,6 +192,7 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   defp handle_stream(pad, stream_type, ctx, state) do
     stream_category = TS.PMT.get_stream_category(stream_type)
+    wait_on_buffers? = ctx.pads[pad].options[:wait_on_buffers?]
 
     {pid, state} =
       get_and_update_in(state, [:muxer], fn muxer ->
@@ -191,8 +210,16 @@ defmodule Membrane.MPEG.TS.Muxer do
 
     state =
       state
-      |> put_in([:pad_to_stream, pad], %{pid: pid, type: stream_type, category: stream_category})
-      |> update_in([:queue], &TimestampQueue.register_pad(&1, pad, wait_on_buffers?: false))
+      |> put_in([:pad_to_stream, pad], %{
+        pid: pid,
+        type: stream_type,
+        category: stream_category,
+        wait_on_buffers?: wait_on_buffers?
+      })
+      |> update_in(
+        [:queue],
+        &TimestampQueue.register_pad(&1, pad, wait_on_buffers?: wait_on_buffers?)
+      )
 
     if ctx.playback == :playing do
       # Each time a pad is added at runtime, update the PMT.
