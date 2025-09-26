@@ -177,8 +177,14 @@ defmodule Membrane.MPEG.TS.Muxer do
 
     {pid, state} =
       get_and_update_in(state, [:muxer], fn muxer ->
-        # TODO: we could indicated this stream as PCR carrier if needed.
-        TS.Muxer.add_elementary_stream(muxer, stream_type)
+        # TODO: PCR?
+        program_info =
+          case stream_type do
+            :SCTE_35_SPLICE -> [%{tag: 5, data: "CUEI"}]
+            _ -> []
+          end
+
+        TS.Muxer.add_elementary_stream(muxer, stream_type, program_info: program_info)
       end)
 
     Membrane.Logger.info("Binding #{inspect(pad)} to #{pid} (#{inspect(stream_type)})")
@@ -186,7 +192,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     state =
       state
       |> put_in([:pad_to_stream, pad], %{pid: pid, type: stream_type, category: stream_category})
-      |> update_in([:queue], &TimestampQueue.register_pad(&1, pad))
+      |> update_in([:queue], &TimestampQueue.register_pad(&1, pad, wait_on_buffers?: false))
 
     if ctx.playback == :playing do
       # Each time a pad is added at runtime, update the PMT.
