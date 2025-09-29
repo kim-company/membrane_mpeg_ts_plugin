@@ -13,6 +13,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
   alias MPEG.TS
   alias MPEG.TS.Demuxer.Container
 
+  # MPEG-TS 33-bit rollover period in nanoseconds: 2^33 * (10^9 / 90000)
+  @rollover_period_ns 95_443_717_688_889
+  @rollover_threshold div(@rollover_period_ns, 2)
+
   def_input_pad(:input,
     accepted_format: %Membrane.RemoteStream{},
     flow_control: :auto
@@ -61,7 +65,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
     state = %{
       demuxer: TS.Demuxer.new(strict?: opts.strict?),
       subscribers: %{},
-      pid_to_pads: %{}
+      pid_to_pads: %{},
+      timestamp_rollover: %{}
     }
 
     {[], state}
@@ -143,7 +148,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   defp handle_demuxed(unit = %Container{pid: pid}, _ctx, state) do
     pads = get_in(state, [:pid_to_pads, Access.key(pid, [])])
-    buffer = ts_unit_to_buffer(unit)
+    {buffer, updated_rollover_state} = ts_unit_to_buffer(unit, state.timestamp_rollover)
     discontinue? = get_in(buffer, [Access.key!(:metadata), Access.key(:discontinuity, false)])
 
     actions =
@@ -152,6 +157,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
         extras ++ [{:buffer, {pad, buffer}}]
       end)
 
+    state = %{state | timestamp_rollover: updated_rollover_state}
     {actions, state}
   end
 
@@ -227,24 +233,57 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {actions, state}
   end
 
-  defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}}) do
-    %Membrane.Buffer{
+  defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}, pid: pid}, timestamp_rollover) do
+    {corrected_pts, updated_rollover} = correct_timestamp(x.pts, pid, timestamp_rollover)
+    {corrected_dts, final_rollover} = correct_timestamp(x.dts, pid, updated_rollover)
+
+    buffer = %Membrane.Buffer{
       payload: x.data,
-      pts: x.pts,
-      dts: x.dts,
+      pts: corrected_pts,
+      dts: corrected_dts,
       metadata: %{
         stream_id: x.stream_id,
         is_aligned: x.is_aligned,
-        discontinuity: x.discontinuity
+        discontinuity: x.discontinuity,
+        original_pts: x.pts,
+        original_dts: x.dts
       }
     }
+
+    {buffer, final_rollover}
   end
 
-  defp ts_unit_to_buffer(%Container{payload: x = %TS.PSI{}, t: best_effort_t}) do
-    %Membrane.Buffer{
+  defp ts_unit_to_buffer(%Container{payload: x = %TS.PSI{}, t: best_effort_t}, timestamp_rollover) do
+    buffer = %Membrane.Buffer{
       payload: TS.Marshaler.marshal(x),
       pts: best_effort_t,
       metadata: %{psi: x}
     }
+
+    {buffer, timestamp_rollover}
+  end
+
+  defp correct_timestamp(nil, _pid, rollover_state) do
+    {nil, rollover_state}
+  end
+
+  defp correct_timestamp(timestamp, pid, rollover_state) when is_map_key(rollover_state, pid) do
+    %{last: last_ts, count: count} = Map.fetch!(rollover_state, pid)
+
+    if last_ts - timestamp > @rollover_threshold do
+      new_count = count + 1
+      corrected_ts = timestamp + new_count * @rollover_period_ns
+      new_state = Map.put(rollover_state, pid, %{last: timestamp, count: new_count})
+      {corrected_ts, new_state}
+    else
+      corrected_ts = timestamp + count * @rollover_period_ns
+      new_state = Map.put(rollover_state, pid, %{last: timestamp, count: count})
+      {corrected_ts, new_state}
+    end
+  end
+
+  defp correct_timestamp(timestamp, pid, rollover_state) do
+    new_state = Map.put(rollover_state, pid, %{last: timestamp, count: 0})
+    {timestamp, new_state}
   end
 end
