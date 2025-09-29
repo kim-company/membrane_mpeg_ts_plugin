@@ -45,35 +45,35 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
       |> child({:sink, :h264}, %Membrane.Testing.Sink{})
     ]
 
-    buffers =
-      Stream.resource(
-        fn ->
-          Testing.Pipeline.start_link_supervised!(spec: spec)
-        end,
-        fn pid ->
-          receive do
-            {Membrane.Testing.Pipeline, ^pid,
-             {:handle_child_notification, {{:buffer, buffer}, {:sink, :h264}}}} ->
-              {[buffer], pid}
+    Stream.resource(
+      fn ->
+        Testing.Pipeline.start_link_supervised!(spec: spec)
+      end,
+      fn pid ->
+        receive do
+          {Membrane.Testing.Pipeline, ^pid,
+           {:handle_child_notification, {{:buffer, buffer}, {:sink, :h264}}}} ->
+            {[buffer], pid}
 
-            {Membrane.Testing.Pipeline, ^pid,
-             {:handle_child_notification, {{:end_of_stream, :input}, {:sink, :h264}}}} ->
-              {:halt, pid}
-          after
-            3_000 ->
-              raise "test timeout"
-          end
-        end,
-        fn pid -> Membrane.Testing.Pipeline.terminate(pid, force?: true) end
-      )
-      |> Enum.into([])
-
-    Enum.reduce(buffers, fn buf, prev_buf ->
+          {Membrane.Testing.Pipeline, ^pid,
+           {:handle_child_notification, {{:end_of_stream, :input}, {:sink, :h264}}}} ->
+            {:halt, pid}
+        after
+          3_000 ->
+            raise "test timeout"
+        end
+      end,
+      fn pid -> Membrane.Testing.Pipeline.terminate(pid, force?: true) end
+    )
+    |> Enum.reduce(fn buf, prev_buf ->
+      # Assert that the timestamps are monotonically increasing
       assert buf.dts > prev_buf.dts
-      # Convert nanoseconds back to 90kHz for the remainder check
+
+      # Assert that the timestamps are being increased correctly
       dts_90khz = MPEG.TS.convert_ns_to_ts(buf.dts)
       original_dts_90khz = MPEG.TS.convert_ns_to_ts(buf.metadata.original_dts)
       assert rem(dts_90khz, 1 <<< 33) == original_dts_90khz
+
       buf
     end)
   end
