@@ -13,6 +13,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
   alias MPEG.TS
   alias MPEG.TS.Demuxer.Container
 
+  # MPEG-TS 33-bit rollover period in nanoseconds: 2^33 * (10^9 / 90000)
+  @rollover_period_ns 95_443_717_688_889
+  @rollover_threshold div(@rollover_period_ns, 2)
+
   def_input_pad(:input,
     accepted_format: %Membrane.RemoteStream{},
     flow_control: :auto
@@ -259,32 +263,27 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {buffer, timestamp_rollover}
   end
 
-  # MPEG-TS 33-bit rollover period in nanoseconds: 2^33 * (10^9 / 90000)
-  @rollover_period_ns 95_443_717_688_889
-  @rollover_threshold div(@rollover_period_ns, 2)
+  defp correct_timestamp(nil, _pid, rollover_state) do
+    {nil, rollover_state}
+  end
 
-  defp correct_timestamp(nil, _pid, rollover_state), do: {nil, rollover_state}
+  defp correct_timestamp(timestamp, pid, rollover_state) when is_map_key(rollover_state, pid) do
+    %{last: last_ts, count: count} = Map.fetch!(rollover_state, pid)
+
+    if last_ts - timestamp > @rollover_threshold do
+      new_count = count + 1
+      corrected_ts = timestamp + new_count * @rollover_period_ns
+      new_state = Map.put(rollover_state, pid, %{last: timestamp, count: new_count})
+      {corrected_ts, new_state}
+    else
+      corrected_ts = timestamp + count * @rollover_period_ns
+      new_state = Map.put(rollover_state, pid, %{last: timestamp, count: count})
+      {corrected_ts, new_state}
+    end
+  end
 
   defp correct_timestamp(timestamp, pid, rollover_state) do
-    case Map.get(rollover_state, pid) do
-      nil ->
-        # First timestamp for this PID
-        new_state = Map.put(rollover_state, pid, %{last: timestamp, count: 0})
-        {timestamp, new_state}
-
-      %{last: last_ts, count: count} ->
-        # Detect rollover: current timestamp much smaller than last
-        if last_ts - timestamp > @rollover_threshold do
-          new_count = count + 1
-          corrected_ts = timestamp + new_count * @rollover_period_ns
-          new_state = Map.put(rollover_state, pid, %{last: timestamp, count: new_count})
-          {corrected_ts, new_state}
-        else
-          # Normal case: add current rollover offset
-          corrected_ts = timestamp + count * @rollover_period_ns
-          new_state = Map.put(rollover_state, pid, %{last: timestamp, count: count})
-          {corrected_ts, new_state}
-        end
-    end
+    new_state = Map.put(rollover_state, pid, %{last: timestamp, count: 0})
+    {timestamp, new_state}
   end
 end
