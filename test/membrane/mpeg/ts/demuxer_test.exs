@@ -1,6 +1,7 @@
 defmodule Membrane.MPEG.TS.DemuxerTest do
   use ExUnit.Case, async: true
 
+  import Bitwise
   import Membrane.Testing.Assertions
   import Membrane.ChildrenSpec
   alias Membrane.Testing
@@ -31,6 +32,50 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     assert_sink_stream_format(pid, {:sink, :aac}, %Membrane.RemoteStream{
       content_format: %MPEG.TS.StreamFormat{stream_type: :AAC_ADTS}
     })
+  end
+
+  test "correctly handles the mpegts rollover and converts it into monotonic pts/dts" do
+    spec = [
+      child(:source, %Membrane.File.Source{
+        location: "test/data/rollover.ts"
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x100])
+      |> child({:sink, :h264}, %Membrane.Testing.Sink{})
+    ]
+
+    Stream.resource(
+      fn ->
+        Testing.Pipeline.start_link_supervised!(spec: spec)
+      end,
+      fn pid ->
+        receive do
+          {Membrane.Testing.Pipeline, ^pid,
+           {:handle_child_notification, {{:buffer, buffer}, {:sink, :h264}}}} ->
+            {[buffer], pid}
+
+          {Membrane.Testing.Pipeline, ^pid,
+           {:handle_child_notification, {{:end_of_stream, :input}, {:sink, :h264}}}} ->
+            {:halt, pid}
+        after
+          3_000 ->
+            raise "test timeout"
+        end
+      end,
+      fn pid -> Membrane.Testing.Pipeline.terminate(pid, force?: true) end
+    )
+    |> Enum.reduce(fn buf, prev_buf ->
+      # Assert that the timestamps are monotonically increasing
+      assert buf.dts > prev_buf.dts
+
+      # Assert that the timestamps are being increased correctly
+      dts_90khz = MPEG.TS.convert_ns_to_ts(buf.dts)
+      original_dts_90khz = MPEG.TS.convert_ns_to_ts(buf.metadata.original_dts)
+      assert rem(dts_90khz, 1 <<< 33) == original_dts_90khz
+
+      buf
+    end)
   end
 
   @tag :tmp_dir
