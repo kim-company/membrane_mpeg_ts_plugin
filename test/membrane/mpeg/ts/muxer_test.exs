@@ -133,4 +133,49 @@ defmodule Membrane.MPEG.TS.MuxerTest do
              }
            ]
   end
+
+  @tag :tmp_dir
+  test "muxer correctly handles timestamp rollover conversion", %{tmp_dir: tmp_dir} do
+    output_path = Path.join(tmp_dir, "rollover_muxed.ts")
+
+    # Get original timestamps from input file
+    original_containers =
+      "test/data/rollover.ts"
+      |> MPEG.TS.Demuxer.stream_file!()
+      |> Stream.filter(fn %{pid: pid} -> pid == 0x100 end)
+      |> Enum.to_list()
+
+    spec = [
+      child(:source, %Membrane.File.Source{location: "test/data/rollover.ts"})
+      |> child(:demuxer, TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x100])
+      |> child({:h264, :parser}, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+      |> via_in(:input, options: [stream_type: :H264_AVC])
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Membrane.File.Sink{location: output_path})
+    ]
+
+    pid = Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, :sink)
+    :ok = Membrane.Pipeline.terminate(pid)
+
+    # Get timestamps from muxed output file
+    output_containers =
+      output_path
+      |> MPEG.TS.Demuxer.stream_file!()
+      |> Stream.filter(fn %{pid: pid} -> pid == 0x100 end)
+      |> Enum.to_list()
+
+    assert length(output_containers) > 0
+    assert length(original_containers) == length(output_containers)
+
+    # Verify that original and output timestamps match exactly
+    Enum.zip(original_containers, output_containers)
+    |> Enum.each(fn {original, output} ->
+      assert original.t == output.t,
+             "Timestamp mismatch: original=#{original.t}, output=#{output.t}"
+    end)
+  end
 end
