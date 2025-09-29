@@ -86,11 +86,11 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   @impl true
-  def handle_end_of_stream(pad, _ctx, state) do
+  def handle_end_of_stream(pad, ctx, state) do
     state.queue
     |> TimestampQueue.push_end_of_stream(pad)
     |> TimestampQueue.pop_available_items()
-    |> handle_queue_output(state)
+    |> handle_queue_output(ctx, state)
   end
 
   @impl true
@@ -100,10 +100,10 @@ defmodule Membrane.MPEG.TS.Muxer do
   end
 
   @impl true
-  def handle_buffer(pad, buffer, _ctx, state) do
+  def handle_buffer(pad, buffer, ctx, state) do
     state.queue
     |> TimestampQueue.push_buffer_and_pop_available_items(pad, buffer)
-    |> handle_queue_output(state)
+    |> handle_queue_output(ctx, state)
     |> unblock_awaiting_pads()
   end
 
@@ -119,10 +119,10 @@ defmodule Membrane.MPEG.TS.Muxer do
     {actions, state}
   end
 
-  defp handle_queue_output({suggested_actions, items, queue}, state) do
+  defp handle_queue_output({suggested_actions, items, queue}, ctx, state) do
     state = %{state | queue: queue}
     {actions, state} = Enum.flat_map_reduce(items, state, &handle_queue_item/2)
-    {suggested_actions ++ actions ++ maybe_end_of_stream(state), state}
+    {suggested_actions ++ actions ++ maybe_end_of_stream(ctx, state), state}
   end
 
   defp handle_queue_item({pad, {:buffer, buffer}}, state) do
@@ -229,8 +229,9 @@ defmodule Membrane.MPEG.TS.Muxer do
     end
   end
 
-  defp maybe_end_of_stream(state) do
-    if TimestampQueue.pads(state.queue) |> MapSet.size() == 0 do
+  defp maybe_end_of_stream(ctx, state) do
+    if TimestampQueue.pads(state.queue) |> MapSet.size() == 0 and
+         not ctx.pads.output.end_of_stream? do
       [end_of_stream: :output]
     else
       []
