@@ -72,7 +72,7 @@ defmodule Membrane.MPEG.TS.Muxer do
         ctx,
         state
       ) do
-    handle_stream(pad, stream_type, ctx, state, [])
+    handle_stream(pad, stream_type, ctx, state)
   end
 
   def handle_stream_format(pad, _format, _ctx, state) when is_map_key(state.pad_to_stream, pad) do
@@ -105,7 +105,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   @impl true
   def handle_pad_added(pad, ctx, state) do
     stream_type = ctx.pad_options[:stream_type]
-    handle_stream(pad, stream_type, ctx, state, pid: ctx.pad_options[:pid])
+    handle_stream(pad, stream_type, ctx, state)
   end
 
   @impl true
@@ -193,14 +193,14 @@ defmodule Membrane.MPEG.TS.Muxer do
   defp handle_queue_item(_, state), do: {[], state}
 
   # We have to stream_type information, we'll wait for the stream_format event.
-  defp handle_stream(_pad, nil, _ctx, state, _opts), do: {[], state}
+  defp handle_stream(_pad, nil, _ctx, state), do: {[], state}
 
   # The stream has already been added.
-  defp handle_stream(pad, _stream_format, _ctx, state, _opts)
+  defp handle_stream(pad, _stream_format, _ctx, state)
        when is_map_key(state.pad_to_stream, pad),
        do: {[], state}
 
-  defp handle_stream(pad, stream_type, ctx, state, opts) do
+  defp handle_stream(pad, stream_type, ctx, state) do
     stream_category = TS.PMT.get_stream_category(stream_type)
     wait_on_buffers? = ctx.pads[pad].options[:wait_on_buffers?]
 
@@ -213,10 +213,12 @@ defmodule Membrane.MPEG.TS.Muxer do
             _ -> []
           end
 
+        pid = ctx.pads[pad].options[:pid]
+
         stream_opts =
           List.flatten([
             [program_info: program_info],
-            if(opts[:pid] != nil, do: [pid: opts[:pid]], else: [])
+            if(pid != nil, do: [pid: pid], else: [])
           ])
 
         TS.Muxer.add_elementary_stream(muxer, stream_type, stream_opts)
