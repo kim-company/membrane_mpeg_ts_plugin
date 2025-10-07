@@ -26,11 +26,11 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     :ok = Membrane.Pipeline.terminate(pid)
 
     assert_sink_stream_format(pid, {:sink, :h264}, %Membrane.RemoteStream{
-      content_format: %MPEG.TS.StreamFormat{stream_type: :H264_AVC}
+      content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: :H264_AVC}
     })
 
     assert_sink_stream_format(pid, {:sink, :aac}, %Membrane.RemoteStream{
-      content_format: %MPEG.TS.StreamFormat{stream_type: :AAC_ADTS}
+      content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: :AAC_ADTS}
     })
   end
 

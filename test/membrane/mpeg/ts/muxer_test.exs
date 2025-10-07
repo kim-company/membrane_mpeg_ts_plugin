@@ -62,7 +62,7 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       |> child(:demuxer, TS.Demuxer),
       get_child(:demuxer)
       |> via_out(:output, options: [pid: 0x100])
-      |> via_in(:input, options: [stream_type: :SCTE_35_SPLICE])
+      |> via_in(:input, options: [stream_type: :SCTE_35_SPLICE, pid: 500])
       |> get_child(:muxer),
       get_child(:demuxer)
       |> via_out(:output, options: [pid: 0x101])
@@ -87,9 +87,9 @@ defmodule Membrane.MPEG.TS.MuxerTest do
 
     assert length(units) > 0
 
-    assert Enum.filter(units, fn %{pid: x} -> x == 256 end) == [
+    assert Enum.filter(units, fn %{pid: x} -> x == 500 end) == [
              %MPEG.TS.Demuxer.Container{
-               pid: 256,
+               pid: 500,
                t: 60_000_000_000,
                payload: %MPEG.TS.PSI{
                  header: %{

@@ -223,7 +223,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
             |> Map.fetch!(pid)
 
           format = %Membrane.RemoteStream{
-            content_format: %TS.StreamFormat{stream_type: stream.stream_type}
+            content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: stream.stream_type}
           }
 
           {:stream_format, {pad, format}}
