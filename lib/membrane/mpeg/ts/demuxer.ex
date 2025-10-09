@@ -263,7 +263,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
     buffer = %Membrane.Buffer{
       payload: TS.Marshaler.marshal(x),
       pts: corrected_pts,
-      metadata: %{psi: x}
+      metadata: %{
+        psi: x,
+        original_pts: best_effort_t
+      }
     }
 
     {buffer, timestamp_rollover}
