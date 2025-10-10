@@ -69,6 +69,9 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
       # Assert that the timestamps are monotonically increasing
       assert buf.dts > prev_buf.dts
 
+      # Ensure that its a consistent timeline
+      assert buf.dts - prev_buf.dts < Membrane.Time.second()
+
       # Assert that the timestamps are being increased correctly
       dts_90khz = MPEG.TS.convert_ns_to_ts(buf.dts)
       original_dts_90khz = MPEG.TS.convert_ns_to_ts(buf.metadata.original_dts)
