@@ -275,7 +275,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
       }
     }
 
-    updated_rollover = Map.put(rollover, pid, %{pts: updated_pts, dts: pid_rollover.dts})
+    updated_rollover = Map.put(rollover, pid, %{pts: updated_pts})
     {buffer, updated_rollover}
   end
 
