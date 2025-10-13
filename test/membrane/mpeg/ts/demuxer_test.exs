@@ -45,6 +45,8 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
       |> child({:sink, :h264}, %Membrane.Testing.Sink{})
     ]
 
+    rollover_period_ns = 95_443_717_688_889
+
     Stream.resource(
       fn ->
         Testing.Pipeline.start_link_supervised!(spec: spec)
@@ -72,6 +74,10 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
       # Ensure that its a consistent timeline
       assert_in_delta buf.dts, prev_buf.dts, Membrane.Time.seconds(10)
       assert_in_delta buf.pts, prev_buf.pts, Membrane.Time.seconds(10)
+
+      # Ensure that we dont go above a certain value
+      assert buf.dts < rollover_period_ns + Membrane.Time.minutes(1)
+      assert buf.pts < rollover_period_ns + Membrane.Time.minutes(1)
 
       # Assert that the timestamps are being increased correctly
       dts_90khz = MPEG.TS.convert_ns_to_ts(buf.dts)
