@@ -236,21 +236,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}, pid: pid}, pid, rollover) do
     pid_rollover = Map.get(rollover, pid, %{pts: %{}, dts: %{}})
-    {corrected_pts, updated_pts} = correct_timestamp(x.pts, pid_rollover.pts)
-    {corrected_dts, updated_dts} = correct_timestamp(x.dts, pid_rollover.dts)
-
-    IO.inspect(corrected_dts, label: "Buffer DTS was #{x.dts} and became")
-    IO.inspect(corrected_pts, label: "Buffer PTS was #{x.pts} and became")
-
-    if pid_rollover.dts[:count] != (count = updated_dts[:count]) do
-      IO.inspect("Rollover for pid #{pid} DTS occured. Count: #{count}")
-    end
-
-    if pid_rollover.pts[:count] != (count = updated_pts[:count]) do
-      IO.inspect("Rollover for pid #{pid} PTS occured. Count: #{count}")
-    end
-
-    IO.inspect("--------")
+    {corrected_pts, updated_pts} = correct_timestamp("#{pid}:pts", x.pts, pid_rollover.pts)
+    {corrected_dts, updated_dts} = correct_timestamp("#{pid}:dts", x.dts, pid_rollover.dts)
 
     buffer = %Membrane.Buffer{
       payload: x.data,
@@ -274,8 +261,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
          pid,
          rollover
        ) do
-    pid_rollover = Map.get(rollover, pid, %{pts: %{}, dts: %{}})
-    {corrected_pts, updated_pts} = correct_timestamp(best_effort_t, pid_rollover.pts)
+    pid_rollover = Map.get(rollover, pid, %{pts: %{}})
+
+    {corrected_pts, updated_pts} =
+      correct_timestamp("#{pid}:pts", best_effort_t, pid_rollover.pts)
 
     buffer = %Membrane.Buffer{
       payload: TS.Marshaler.marshal(x),
@@ -290,26 +279,39 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {buffer, updated_rollover}
   end
 
-  defp correct_timestamp(nil, ts_state) do
+  defp correct_timestamp(_tag, nil, ts_state) do
     {nil, ts_state}
   end
 
-  defp correct_timestamp(timestamp, ts_state) when ts_state != %{} do
+  defp correct_timestamp(tag, timestamp, ts_state) when ts_state != %{} do
     %{last: last_ts, count: count} = ts_state
 
-    if last_ts - timestamp > @rollover_threshold do
-      new_count = count + 1
-      corrected_ts = timestamp + new_count * @rollover_period_ns
-      updated_state = %{last: timestamp, count: new_count}
-      {corrected_ts, updated_state}
-    else
-      corrected_ts = timestamp + count * @rollover_period_ns
-      updated_state = %{last: timestamp, count: count}
-      {corrected_ts, updated_state}
+    cond do
+      last_ts - timestamp > @rollover_threshold ->
+        Membrane.Logger.info(
+          "[#{tag}] Rollover occured from #{timestamp} to #{last_ts}. Increasing rollover count #{count + 1}."
+        )
+
+        new_count = count + 1
+        corrected_ts = timestamp + new_count * @rollover_period_ns
+        {corrected_ts, %{last: timestamp, count: new_count}}
+
+      timestamp - last_ts > @rollover_threshold and count > 0 ->
+        Membrane.Logger.info(
+          "[#{tag}] Rollover occured from #{timestamp} to #{last_ts}. Decreasing rollover count to #{count - 1}."
+        )
+
+        new_count = count - 1
+        corrected_ts = timestamp + new_count * @rollover_period_ns
+        {corrected_ts, %{last: timestamp, count: new_count}}
+
+      true ->
+        corrected_ts = timestamp + count * @rollover_period_ns
+        {corrected_ts, %{last: timestamp, count: count}}
     end
   end
 
-  defp correct_timestamp(timestamp, _ts_state) do
+  defp correct_timestamp(_tag, timestamp, _ts_state) do
     {timestamp, %{last: timestamp, count: 0}}
   end
 end

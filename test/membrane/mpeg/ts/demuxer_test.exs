@@ -35,6 +35,17 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
   end
 
   test "correctly handles the mpegts rollover and converts it into monotonic pts/dts" do
+    # NOTE: This test file was generated using the following ffmpeg command:
+    # ```bash
+    # ffmpeg -f lavfi -i "testsrc2=size=128x72:rate=1" -t 20 \
+    #    -c:v libx264 -preset veryslow -crf 42 -pix_fmt yuv420p \
+    #    -g 30 -bf 3 -sc_threshold 0 -x264-params "keyint=30:min-keyint=30:scenecut=0" \
+    #    -an \
+    #    -mpegts_copyts 1 \
+    #    -output_ts_offset 95433.7176889 \
+    #    -pat_period 1.0 -sdt_period 5.0 \
+    #    -f mpegts rollover.ts
+    # ```
     spec = [
       child(:source, %Membrane.File.Source{
         location: "test/data/rollover.ts"
@@ -72,8 +83,9 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
       assert buf.dts > prev_buf.dts
 
       # Ensure that its a consistent timeline
-      assert_in_delta buf.dts, prev_buf.dts, Membrane.Time.seconds(10)
-      assert_in_delta buf.pts, prev_buf.pts, Membrane.Time.seconds(10)
+      assert_in_delta buf.pts, buf.pts, Membrane.Time.second()
+      assert_in_delta buf.dts, prev_buf.dts, Membrane.Time.seconds(1)
+      assert_in_delta buf.pts, prev_buf.pts, Membrane.Time.seconds(5)
 
       # Ensure that we dont go above a certain value
       assert buf.dts < rollover_period_ns + Membrane.Time.minutes(1)
