@@ -8,7 +8,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
   Table](https://en.wikipedia.org/wiki/MPEG_transport_stream#PMT).
   """
   use Membrane.Filter
-  require Logger
+  require Membrane.Logger
 
   alias MPEG.TS
   alias MPEG.TS.Demuxer.Container
@@ -238,6 +238,19 @@ defmodule Membrane.MPEG.TS.Demuxer do
     pid_rollover = Map.get(rollover, pid, %{pts: %{}, dts: %{}})
     {corrected_pts, updated_pts} = correct_timestamp(x.pts, pid_rollover.pts)
     {corrected_dts, updated_dts} = correct_timestamp(x.dts, pid_rollover.dts)
+
+    IO.inspect(corrected_dts, label: "Buffer DTS was #{x.dts} and became")
+    IO.inspect(corrected_pts, label: "Buffer PTS was #{x.pts} and became")
+
+    if pid_rollover.dts[:count] != (count = updated_dts[:count]) do
+      IO.inspect("Rollover for pid #{pid} DTS occured. Count: #{count}")
+    end
+
+    if pid_rollover.pts[:count] != (count = updated_pts[:count]) do
+      IO.inspect("Rollover for pid #{pid} PTS occured. Count: #{count}")
+    end
+
+    IO.inspect("--------")
 
     buffer = %Membrane.Buffer{
       payload: x.data,
