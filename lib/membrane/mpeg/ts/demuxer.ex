@@ -13,10 +13,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
   alias MPEG.TS
   alias MPEG.TS.Demuxer.Container
 
-  # MPEG-TS 33-bit rollover period in nanoseconds: 2^33 * (10^9 / 90000)
-  @rollover_period_ns 95_443_717_688_889
-  @rollover_threshold div(@rollover_period_ns, 2)
-
   def_input_pad(:input,
     accepted_format: %Membrane.RemoteStream{},
     flow_control: :auto
@@ -65,8 +61,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
     state = %{
       demuxer: TS.Demuxer.new(strict?: opts.strict?),
       subscribers: %{},
-      pid_to_pads: %{},
-      rollover: %{}
+      pid_to_pads: %{}
     }
 
     {[], state}
@@ -148,7 +143,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   defp handle_demuxed(unit = %Container{pid: pid}, _ctx, state) do
     pads = get_in(state, [:pid_to_pads, Access.key(pid, [])])
-    {buffer, updated_rollover} = ts_unit_to_buffer(unit, pid, state.rollover)
+    buffer = ts_unit_to_buffer(unit)
     discontinue? = get_in(buffer, [Access.key!(:metadata), Access.key(:discontinuity, false)])
 
     actions =
@@ -156,8 +151,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
         extras = if discontinue?, do: [{:event, {pad, %Membrane.Event.Discontinuity{}}}], else: []
         extras ++ [{:buffer, {pad, buffer}}]
       end)
-
-    state = %{state | rollover: updated_rollover}
 
     {actions, state}
   end
@@ -234,84 +227,26 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {actions, state}
   end
 
-  defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}, pid: pid}, pid, rollover) do
-    pid_rollover = Map.get(rollover, pid, %{pts: %{}, dts: %{}})
-    {corrected_pts, updated_pts} = correct_timestamp("#{pid}:pts", x.pts, pid_rollover.pts)
-    {corrected_dts, updated_dts} = correct_timestamp("#{pid}:dts", x.dts, pid_rollover.dts)
-
-    buffer = %Membrane.Buffer{
+  defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}}) do
+    %Membrane.Buffer{
       payload: x.data,
-      pts: corrected_pts,
-      dts: corrected_dts,
+      pts: x.pts,
+      dts: x.dts,
       metadata: %{
         stream_id: x.stream_id,
         is_aligned: x.is_aligned,
-        discontinuity: x.discontinuity,
-        original_pts: x.pts,
-        original_dts: x.dts
+        discontinuity: x.discontinuity
       }
     }
-
-    updated_rollover = Map.put(rollover, pid, %{pts: updated_pts, dts: updated_dts})
-    {buffer, updated_rollover}
   end
 
-  defp ts_unit_to_buffer(
-         %Container{payload: x = %TS.PSI{}, t: best_effort_t, pid: pid},
-         pid,
-         rollover
-       ) do
-    pid_rollover = Map.get(rollover, pid, %{pts: %{}})
-
-    {corrected_pts, updated_pts} =
-      correct_timestamp("#{pid}:pts", best_effort_t, pid_rollover.pts)
-
-    buffer = %Membrane.Buffer{
+  defp ts_unit_to_buffer(%Container{payload: x = %TS.PSI{}, t: t}) do
+    %Membrane.Buffer{
       payload: TS.Marshaler.marshal(x),
-      pts: corrected_pts,
+      dts: t,
       metadata: %{
-        psi: x,
-        original_pts: best_effort_t
+        psi: x
       }
     }
-
-    updated_rollover = Map.put(rollover, pid, %{pts: updated_pts})
-    {buffer, updated_rollover}
-  end
-
-  defp correct_timestamp(_tag, nil, ts_state) do
-    {nil, ts_state}
-  end
-
-  defp correct_timestamp(tag, timestamp, ts_state) when ts_state != %{} do
-    %{last: last_ts, count: count} = ts_state
-
-    cond do
-      last_ts - timestamp > @rollover_threshold ->
-        Membrane.Logger.info(
-          "[#{tag}] Rollover occured from #{timestamp} to #{last_ts}. Increasing rollover count #{count + 1}."
-        )
-
-        new_count = count + 1
-        corrected_ts = timestamp + new_count * @rollover_period_ns
-        {corrected_ts, %{last: timestamp, count: new_count}}
-
-      timestamp - last_ts > @rollover_threshold and count > 0 ->
-        Membrane.Logger.info(
-          "[#{tag}] Rollover occured from #{timestamp} to #{last_ts}. Decreasing rollover count to #{count - 1}."
-        )
-
-        new_count = count - 1
-        corrected_ts = timestamp + new_count * @rollover_period_ns
-        {corrected_ts, %{last: timestamp, count: new_count}}
-
-      true ->
-        corrected_ts = timestamp + count * @rollover_period_ns
-        {corrected_ts, %{last: timestamp, count: count}}
-    end
-  end
-
-  defp correct_timestamp(_tag, timestamp, _ts_state) do
-    {timestamp, %{last: timestamp, count: 0}}
   end
 end

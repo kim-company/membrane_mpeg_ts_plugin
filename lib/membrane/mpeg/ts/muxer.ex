@@ -51,7 +51,7 @@ defmodule Membrane.MPEG.TS.Muxer do
     queue =
       TimestampQueue.new(
         pause_demand_boundary: {:time, @queue_buffer},
-        synchronization_strategy: :synchronize_on_arrival
+        synchronization_strategy: :explicit_offsets
       )
 
     state = %{

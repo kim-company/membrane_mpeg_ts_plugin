@@ -1,7 +1,6 @@
 defmodule Membrane.MPEG.TS.DemuxerTest do
   use ExUnit.Case, async: true
 
-  import Bitwise
   import Membrane.Testing.Assertions
   import Membrane.ChildrenSpec
   alias Membrane.Testing
@@ -90,11 +89,6 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
       # Ensure that we dont go above a certain value
       assert buf.dts < rollover_period_ns + Membrane.Time.minutes(1)
       assert buf.pts < rollover_period_ns + Membrane.Time.minutes(1)
-
-      # Assert that the timestamps are being increased correctly
-      dts_90khz = MPEG.TS.convert_ns_to_ts(buf.dts)
-      original_dts_90khz = MPEG.TS.convert_ns_to_ts(buf.metadata.original_dts)
-      assert rem(dts_90khz, 1 <<< 33) == original_dts_90khz
 
       buf
     end)
@@ -224,7 +218,7 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
         payload:
           <<0, 252, 48, 37, 0, 0, 0, 0, 0, 0, 0, 255, 240, 20, 5, 0, 0, 0, 100, 127, 239, 254, 0,
             82, 101, 192, 126, 0, 82, 101, 192, 0, 1, 18, 255, 0, 0, 93, 125, 122, 192>>,
-        pts: 60_000_000_000,
+        dts: 6_440_000_000,
         metadata: %{psi: %{table_type: :scte35, table: %MPEG.TS.SCTE35{}}}
       }
     )
