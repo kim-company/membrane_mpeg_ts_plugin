@@ -53,13 +53,18 @@ defmodule Membrane.MPEG.TS.Demuxer do
       spec: boolean(),
       default: false,
       desciption: "If true, demuxing errors will raise"
+    ],
+    wait_rai?: [
+      spec: boolean(),
+      default: true,
+      desciption: "If true, first packet buffer is going to be a keyframe (in case of video)"
     ]
   )
 
   @impl true
   def handle_init(_ctx, opts) do
     state = %{
-      demuxer: TS.Demuxer.new(strict?: opts.strict?),
+      demuxer: TS.Demuxer.new(strict?: opts.strict?, wait_rai?: opts.wait_rai?),
       subscribers: %{},
       pid_to_pads: %{}
     }
