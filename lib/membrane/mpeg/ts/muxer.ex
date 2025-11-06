@@ -57,7 +57,9 @@ defmodule Membrane.MPEG.TS.Muxer do
     state = %{
       muxer: TS.Muxer.new(),
       pad_to_stream: %{},
-      queue: queue
+      queue: queue,
+      last_dts: nil,
+      pat_pmt_sent: false
     }
 
     {[], state}
@@ -88,10 +90,8 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   @impl true
   def handle_playing(_ctx, state) do
-    format_actions = [stream_format: {:output, %Membrane.RemoteStream{}}]
-    # Write PAT and PMT at startup, then periodically or at each PMT update.
-    {buffer_actions, state} = mux_pat_pmt(state)
-    {format_actions ++ buffer_actions, state}
+    # Send only stream format; PAT/PMT will be sent with first media buffer
+    {[stream_format: {:output, %Membrane.RemoteStream{}}], state}
   end
 
   @impl true
@@ -137,25 +137,45 @@ defmodule Membrane.MPEG.TS.Muxer do
   defp handle_queue_item({pad, {:buffer, buffer}}, state) do
     stream = get_in(state, [:pad_to_stream, pad])
 
+    # Extract DTS from buffer (use buffer.dts for video, buffer.pts for audio)
+    current_dts =
+      case stream.category do
+        :video -> buffer.dts || buffer.pts
+        :audio -> buffer.pts
+        _ -> nil
+      end
+
+    # Send initial PAT/PMT if not yet sent and we have a valid DTS
+    {initial_pat_pmt_actions, state} =
+      if not state.pat_pmt_sent and current_dts != nil do
+        {actions, state} = mux_pat_pmt(state, current_dts)
+        {actions, %{state | pat_pmt_sent: true}}
+      else
+        {[], state}
+      end
+
+    # Update last_dts if we have a valid one
+    state = if current_dts != nil, do: %{state | last_dts: current_dts}, else: state
+
+    # For video keyframes, generate PAT/PMT separately with proper DTS
+    {keyframe_pat_pmt_actions, state} =
+      if stream.category == :video and Map.get(buffer.metadata, :is_keyframe?, false) and
+           state.last_dts != nil do
+        mux_pat_pmt(state, state.last_dts)
+      else
+        {[], state}
+      end
+
     {packet_or_packets, state} =
       get_and_update_in(state, [:muxer], fn muxer ->
         case stream.category do
           :video ->
             is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
 
-            {packets, muxer} =
-              TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts,
-                dts: buffer.dts,
-                sync?: is_keyframe?
-              )
-
-            if is_keyframe? do
-              {pat, muxer} = TS.Muxer.mux_pat(muxer)
-              {pmt, muxer} = TS.Muxer.mux_pmt(muxer)
-              {[pat, pmt] ++ packets, muxer}
-            else
-              {packets, muxer}
-            end
+            TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts,
+              dts: buffer.dts,
+              sync?: is_keyframe?
+            )
 
           :audio ->
             TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts, sync?: true)
@@ -187,7 +207,7 @@ defmodule Membrane.MPEG.TS.Muxer do
         }
       end)
 
-    {[buffer: {:output, buffers}], state}
+    {initial_pat_pmt_actions ++ keyframe_pat_pmt_actions ++ [buffer: {:output, buffers}], state}
   end
 
   defp handle_queue_item(_, state), do: {[], state}
@@ -239,10 +259,11 @@ defmodule Membrane.MPEG.TS.Muxer do
         &TimestampQueue.register_pad(&1, pad, wait_on_buffers?: wait_on_buffers?)
       )
 
-    if ctx.playback == :playing do
-      # Each time a pad is added at runtime, update the PMT.
-      mux_pat_pmt(state)
+    if ctx.playback == :playing and state.pat_pmt_sent and state.last_dts != nil do
+      # Each time a pad is added at runtime, update the PMT with current timing
+      mux_pat_pmt(state, state.last_dts)
     else
+      # PAT/PMT will be sent with first media buffer
       {[], state}
     end
   end
@@ -271,13 +292,18 @@ defmodule Membrane.MPEG.TS.Muxer do
     }
   end
 
-  defp mux_pat_pmt(state) do
+  defp mux_pat_pmt(state, dts) do
     {pat, state} = get_and_update_in(state, [:muxer], &TS.Muxer.mux_pat(&1))
     {pmt, state} = get_and_update_in(state, [:muxer], &TS.Muxer.mux_pmt(&1))
 
     buffers =
       Enum.map([pat, pmt], fn x ->
-        %Membrane.Buffer{payload: marshal_payload(x), metadata: extract_metadata(x)}
+        %Membrane.Buffer{
+          payload: marshal_payload(x),
+          pts: dts,
+          dts: dts,
+          metadata: extract_metadata(x)
+        }
       end)
 
     {[buffer: {:output, buffers}], state}
