@@ -19,7 +19,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   @queue_buffer Membrane.Time.milliseconds(200)
 
   # PAT/PMT insertion interval per ISO/IEC 13818-1 spec (max 500ms)
-  @pat_pmt_interval Membrane.Time.milliseconds(500)
+  @pat_pmt_interval Membrane.Time.milliseconds(100)
 
   # Standard MPEG-TS system PIDs
   @pat_pid 0x0000
