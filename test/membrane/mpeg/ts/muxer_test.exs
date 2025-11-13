@@ -78,6 +78,49 @@ defmodule Membrane.MPEG.TS.MuxerTest do
     end
   end
 
+  # Validate that ONLY the expected PIDs are present (excluding standard PSI/SI)
+  defp assert_only_expected_pids(analysis, expected_pids) do
+    pids = analysis["pids"] || []
+
+    # Filter out standard PSI/SI PIDs (PAT, PMT, SDT, etc.)
+    standard_pids = [0, 17, 4096]
+    stream_pids = Enum.filter(pids, fn p -> not Enum.member?(standard_pids, p["id"]) end)
+
+    actual_pid_ids = Enum.map(stream_pids, fn p -> p["id"] end) |> Enum.sort()
+    expected_pid_ids = Map.keys(expected_pids) |> Enum.sort()
+
+    assert actual_pid_ids == expected_pid_ids,
+           """
+           PID mismatch in stream:
+           Expected PIDs: #{inspect(expected_pid_ids)}
+           Actual PIDs:   #{inspect(actual_pid_ids)}
+
+           Expected (hex): #{Enum.map(expected_pid_ids, &"0x#{Integer.to_string(&1, 16)}") |> Enum.join(", ")}
+           Actual (hex):   #{Enum.map(actual_pid_ids, &"0x#{Integer.to_string(&1, 16)}") |> Enum.join(", ")}
+           """
+  end
+
+  # Get detailed PID information for debugging
+  defp get_pid_details(analysis, pid) do
+    pids = analysis["pids"] || []
+    pid_info = Enum.find(pids, fn p -> p["id"] == pid end)
+
+    if pid_info do
+      %{
+        pid: pid,
+        hex: "0x#{Integer.to_string(pid, 16)}",
+        description: pid_info["description"] || "N/A",
+        codec: pid_info["codec"] || "N/A",
+        is_video: pid_info["video"] || false,
+        is_audio: pid_info["audio"] || false,
+        packet_count: get_in(pid_info, ["packets", "total"]) || 0,
+        pcr_count: get_in(pid_info, ["packets", "pcr"]) || 0
+      }
+    else
+      nil
+    end
+  end
+
   @tag :tmp_dir
   test "re-muxes avsync", %{tmp_dir: tmp_dir} do
     output_path = Path.join(tmp_dir, "output.ts")
@@ -103,17 +146,41 @@ defmodule Membrane.MPEG.TS.MuxerTest do
     assert_end_of_stream(pid, :sink)
     :ok = Membrane.Pipeline.terminate(pid)
 
-    # Validate the output with tsanalyze
+    # Validate the output with tsanalyze - comprehensive checks
     analysis = run_tsanalyze(output_path)
 
-    # Verify service structure: H264 video on 0x100, AAC audio on 0x101
-    assert_service_structure(analysis, %{0x100 => "AVC", 0x101 => "AAC"})
+    # Define exactly what PIDs we expect in the output
+    expected_pids = %{
+      0x100 => "AVC",  # Video on PID 0x100 (256)
+      0x101 => "AAC"   # Audio on PID 0x101 (257)
+    }
 
-    # Verify audio stream is valid
-    assert_audio_stream_valid(analysis, 0x101)
+    # Verify ONLY these PIDs are present (no unexpected PIDs)
+    assert_only_expected_pids(analysis, expected_pids)
+
+    # Verify service structure matches expected codecs
+    assert_service_structure(analysis, expected_pids)
+
+    # Detailed validation for each stream
+    # Video stream (PID 0x100)
+    video_details = get_pid_details(analysis, 0x100)
+    assert video_details != nil, "Video PID 0x100 not found"
+    assert video_details.is_video == true, "PID 0x100 is not marked as video: #{inspect(video_details)}"
+    assert video_details.packet_count > 0, "Video PID 0x100 has no packets: #{inspect(video_details)}"
+
+    # Audio stream (PID 0x101)
+    audio_details = get_pid_details(analysis, 0x101)
+    assert audio_details != nil, "Audio PID 0x101 not found"
+    assert audio_details.is_audio == true, "PID 0x101 is not marked as audio: #{inspect(audio_details)}"
+    assert audio_details.packet_count > 0, "Audio PID 0x101 has no packets: #{inspect(audio_details)}"
 
     # Verify PCR is present on video stream
     assert_pcr_valid(analysis, 0x100)
+    assert video_details.pcr_count > 0,
+           "Video PID 0x100 should have PCR packets: #{inspect(video_details)}"
+
+    # Verify audio stream is valid
+    assert_audio_stream_valid(analysis, 0x101)
 
     # Verify no transport errors
     assert_no_errors(analysis)
@@ -121,6 +188,8 @@ defmodule Membrane.MPEG.TS.MuxerTest do
 
   @tag :tmp_dir
   test "re-muxes avsync video, w/o specifying the stream_type", %{tmp_dir: tmp_dir} do
+    output_path = Path.join(tmp_dir, "output.ts")
+
     spec = [
       child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
       |> child(:demuxer, TS.Demuxer),
@@ -129,15 +198,36 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       |> via_in(:input)
       |> get_child(:muxer),
       child(:muxer, Membrane.MPEG.TS.Muxer)
-      |> child(:sink, %Membrane.File.Sink{
-        location: Path.join(tmp_dir, "output.ts")
-      })
+      |> child(:sink, %Membrane.File.Sink{location: output_path})
     ]
 
     pid = Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
     assert_end_of_stream(pid, :sink)
-
     :ok = Membrane.Pipeline.terminate(pid)
+
+    # Validate the output with tsanalyze
+    analysis = run_tsanalyze(output_path)
+
+    # This test has only video (auto-detected from stream_format)
+    expected_pids = %{
+      0x100 => "AVC"  # Video on PID 0x100 (256), auto-detected
+    }
+
+    # Verify ONLY video PID is present (no unexpected PIDs)
+    assert_only_expected_pids(analysis, expected_pids)
+
+    # Verify service structure
+    assert_service_structure(analysis, expected_pids)
+
+    # Detailed validation for video stream
+    video_details = get_pid_details(analysis, 0x100)
+    assert video_details != nil, "Video PID 0x100 not found"
+    assert video_details.is_video == true,
+           "PID 0x100 is not marked as video (auto-detection failed): #{inspect(video_details)}"
+    assert video_details.packet_count > 0, "Video PID 0x100 has no packets: #{inspect(video_details)}"
+
+    # Verify no transport errors
+    assert_no_errors(analysis)
   end
 
   @tag :tmp_dir
@@ -156,7 +246,12 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       get_child(:demuxer)
       |> via_out(:output, options: [pid: 0x101])
       |> child({:h264, :parser}, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
-      |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+      |> via_in(:input, options: [stream_type: :H264_AVC, pid: 256, pcr?: true])
+      |> get_child(:muxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x102])
+      |> child({:aac, :parser}, %Membrane.AAC.Parser{})
+      |> via_in(:input, options: [stream_type: :AAC_ADTS, pid: 257])
       |> get_child(:muxer),
       child(:muxer, Membrane.MPEG.TS.Muxer)
       |> child(:sink, %Membrane.File.Sink{
@@ -222,11 +317,49 @@ defmodule Membrane.MPEG.TS.MuxerTest do
              }
            ]
 
-    # Validate with tsanalyze
+    # Validate with tsanalyze - comprehensive PID checks
     analysis = run_tsanalyze(output_path)
 
-    # Verify PCR is present on video stream (PID 0x101 / 257)
-    assert_pcr_valid(analysis, 0x101)
+    # Define exactly what PIDs we expect in the output
+    expected_pids = %{
+      256 => "AVC",   # Video on PID 0x100 (256)
+      257 => "AAC",   # Audio on PID 0x101 (257)
+      500 => "SCTE"   # SCTE-35 on PID 500
+    }
+
+    # Verify ONLY these PIDs are present (no unexpected PIDs)
+    assert_only_expected_pids(analysis, expected_pids)
+
+    # Verify service structure matches expected codecs
+    assert_service_structure(analysis, expected_pids)
+
+    # Detailed validation for each stream
+    # Video stream (PID 256)
+    video_details = get_pid_details(analysis, 256)
+    assert video_details != nil, "Video PID 256 not found"
+    assert video_details.is_video == true, "PID 256 is not marked as video: #{inspect(video_details)}"
+    assert video_details.packet_count > 0, "Video PID 256 has no packets: #{inspect(video_details)}"
+
+    # Audio stream (PID 257)
+    audio_details = get_pid_details(analysis, 257)
+    assert audio_details != nil, "Audio PID 257 not found"
+    assert audio_details.is_audio == true, "PID 257 is not marked as audio: #{inspect(audio_details)}"
+    assert audio_details.packet_count > 0, "Audio PID 257 has no packets: #{inspect(audio_details)}"
+
+    # SCTE-35 stream (PID 500)
+    scte_details = get_pid_details(analysis, 500)
+    assert scte_details != nil, "SCTE PID 500 not found"
+    assert scte_details.packet_count > 0, "SCTE PID 500 has no packets: #{inspect(scte_details)}"
+    assert String.contains?(scte_details.description, "SCTE"),
+           "PID 500 is not SCTE-35: #{inspect(scte_details)}"
+
+    # Verify PCR is present on video stream (PID 256)
+    assert_pcr_valid(analysis, 256)
+    assert video_details.pcr_count > 0,
+           "Video PID 256 should have PCR packets: #{inspect(video_details)}"
+
+    # Verify audio stream is valid
+    assert_audio_stream_valid(analysis, 257)
 
     # Verify no transport errors
     assert_no_errors(analysis)
@@ -275,5 +408,28 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       assert original.t == output.t,
              "Timestamp mismatch: original=#{original.t}, output=#{output.t}"
     end)
+
+    # Additional validation with tsanalyze
+    analysis = run_tsanalyze(output_path)
+
+    # This test has only video
+    expected_pids = %{
+      0x100 => "AVC"  # Video on PID 0x100 (256)
+    }
+
+    # Verify ONLY video PID is present (no unexpected PIDs)
+    assert_only_expected_pids(analysis, expected_pids)
+
+    # Verify service structure
+    assert_service_structure(analysis, expected_pids)
+
+    # Detailed validation for video stream
+    video_details = get_pid_details(analysis, 0x100)
+    assert video_details != nil, "Video PID 0x100 not found"
+    assert video_details.is_video == true, "PID 0x100 is not marked as video: #{inspect(video_details)}"
+    assert video_details.packet_count > 0, "Video PID 0x100 has no packets: #{inspect(video_details)}"
+
+    # Verify no transport errors (critical for timestamp rollover test)
+    assert_no_errors(analysis)
   end
 end
