@@ -432,4 +432,5 @@ defmodule Membrane.MPEG.TS.MuxerTest do
     # Verify no transport errors (critical for timestamp rollover test)
     assert_no_errors(analysis)
   end
+
 end

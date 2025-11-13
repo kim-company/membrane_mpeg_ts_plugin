@@ -227,6 +227,124 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     :ok = Testing.Pipeline.terminate(pid)
   end
 
+  @tag :tmp_dir
+  test "demuxes zee-dump.ts by PIDs (production stream with errors)", %{tmp_dir: tmp_dir} do
+    # This test uses a real production TS file (zee-dump.ts) that has parsing issues
+    # The goal is to verify the demuxer handles problematic files gracefully without crashing
+    video_out = Path.join(tmp_dir, "zee_video.h264")
+    audio_out = Path.join(tmp_dir, "zee_audio.mp2")
+
+    spec = [
+      child(:source, %Membrane.File.Source{
+        location: "test/data/zee-dump.ts"
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 100])
+      |> child({:sink, :video}, %Membrane.File.Sink{
+        location: video_out
+      }),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 200])
+      |> child({:sink, :audio}, %Membrane.File.Sink{
+        location: audio_out
+      })
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pid, :demuxer, {:pmt, %MPEG.TS.PMT{}})
+    assert_end_of_stream(pid, {:sink, :video}, :input)
+    assert_end_of_stream(pid, {:sink, :audio}, :input)
+    :ok = Testing.Pipeline.terminate(pid)
+
+    # The key test: the pipeline completed without crashing despite file errors
+    # Output files should exist (even if empty due to parsing failures)
+    assert {:ok, _video_data} = File.read(video_out)
+    assert {:ok, _audio_data} = File.read(audio_out)
+  end
+
+  @tag :tmp_dir
+  test "demuxes zee-dump.ts video by stream category (error handling)", %{tmp_dir: tmp_dir} do
+    # Tests stream category selection on a problematic production file
+    video_out = Path.join(tmp_dir, "zee_video_category.h264")
+
+    spec = [
+      child(:source, %Membrane.File.Source{
+        location: "test/data/zee-dump.ts"
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_category: :video])
+      |> child(:sink, %Membrane.File.Sink{
+        location: video_out
+      })
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pid, :demuxer, {:pmt, %MPEG.TS.PMT{}})
+    assert_end_of_stream(pid, :sink, :input)
+    :ok = Testing.Pipeline.terminate(pid)
+
+    # Verify pipeline completed without crashing
+    assert {:ok, _video_data} = File.read(video_out)
+  end
+
+  @tag :tmp_dir
+  test "demuxes zee-dump.ts multiple audio streams (error handling)", %{tmp_dir: tmp_dir} do
+    # Tests multiple output pads on a problematic production file
+    audio1_out = Path.join(tmp_dir, "zee_audio1.mp2")
+    audio2_out = Path.join(tmp_dir, "zee_audio2.ac3")
+
+    spec = [
+      child(:source, %Membrane.File.Source{
+        location: "test/data/zee-dump.ts"
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 200])
+      |> child({:sink, :audio1}, %Membrane.File.Sink{
+        location: audio1_out
+      }),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 300])
+      |> child({:sink, :audio2}, %Membrane.File.Sink{
+        location: audio2_out
+      })
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pid, :demuxer, {:pmt, %MPEG.TS.PMT{}})
+    assert_end_of_stream(pid, {:sink, :audio1}, :input)
+    assert_end_of_stream(pid, {:sink, :audio2}, :input)
+    :ok = Testing.Pipeline.terminate(pid)
+
+    # Verify pipeline completed without crashing
+    assert {:ok, _audio1_data} = File.read(audio1_out)
+    assert {:ok, _audio2_data} = File.read(audio2_out)
+  end
+
+  test "demuxes zee-dump.ts and receives PMT (error handling)" do
+    # Tests that even with a problematic file, we get PMT notifications
+    spec = [
+      child(:source, %Membrane.File.Source{
+        location: "test/data/zee-dump.ts"
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 100])
+      |> child({:sink, :video}, %Membrane.Testing.Sink{}),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 200])
+      |> child({:sink, :audio}, %Membrane.Testing.Sink{})
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pid, :demuxer, {:pmt, %MPEG.TS.PMT{}})
+    assert_end_of_stream(pid, {:sink, :video}, :input)
+    assert_end_of_stream(pid, {:sink, :audio}, :input)
+    :ok = Membrane.Pipeline.terminate(pid)
+  end
+
   defp assert_files_equal(file_a, file_b) do
     assert {:ok, a} = File.read(file_a)
     assert {:ok, b} = File.read(file_b)
