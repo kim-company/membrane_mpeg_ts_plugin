@@ -38,6 +38,15 @@ defmodule Membrane.MPEG.TS.Muxer do
         spec: boolean(),
         default: true,
         description: "Block muxer until a buffer on this pad arrives."
+      ],
+      pcr?: [
+        spec: boolean(),
+        default: false,
+        description: """
+        Mark this stream as the PCR (Program Clock Reference) stream.
+        This sets the stream's PID as pcr_pid in the PMT and embeds PCR values
+        in the adaptation field of packets. Typically used for video streams.
+        """
       ]
     ]
   )
@@ -171,10 +180,12 @@ defmodule Membrane.MPEG.TS.Muxer do
         case stream.category do
           :video ->
             is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
+            send_pcr? = Map.get(stream, :pcr?, false)
 
             TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts,
               dts: buffer.dts,
-              sync?: is_keyframe?
+              sync?: is_keyframe?,
+              send_pcr?: send_pcr?
             )
 
           :audio ->
@@ -223,10 +234,10 @@ defmodule Membrane.MPEG.TS.Muxer do
   defp handle_stream(pad, stream_type, ctx, state) do
     stream_category = TS.PMT.get_stream_category(stream_type)
     wait_on_buffers? = ctx.pads[pad].options[:wait_on_buffers?]
+    pcr? = ctx.pads[pad].options[:pcr?]
 
     {pid, state} =
       get_and_update_in(state, [:muxer], fn muxer ->
-        # TODO: PCR?
         program_info =
           case stream_type do
             :SCTE_35_SPLICE -> [%{tag: 5, data: "CUEI"}]
@@ -238,13 +249,14 @@ defmodule Membrane.MPEG.TS.Muxer do
         stream_opts =
           List.flatten([
             [program_info: program_info],
-            if(pid != nil, do: [pid: pid], else: [])
+            if(pid != nil, do: [pid: pid], else: []),
+            if(pcr?, do: [pcr?: true], else: [])
           ])
 
         TS.Muxer.add_elementary_stream(muxer, stream_type, stream_opts)
       end)
 
-    Membrane.Logger.info("Binding #{inspect(pad)} to #{pid} (#{inspect(stream_type)})")
+    Membrane.Logger.info("Binding #{inspect(pad)} to #{pid} (#{inspect(stream_type)}#{if pcr?, do: ", PCR", else: ""})")
 
     state =
       state
@@ -252,7 +264,8 @@ defmodule Membrane.MPEG.TS.Muxer do
         pid: pid,
         type: stream_type,
         category: stream_category,
-        wait_on_buffers?: wait_on_buffers?
+        wait_on_buffers?: wait_on_buffers?,
+        pcr?: pcr?
       })
       |> update_in(
         [:queue],
