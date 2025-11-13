@@ -12,8 +12,19 @@ defmodule Membrane.MPEG.TS.Muxer do
   use Membrane.Filter
   alias MPEG.TS
   alias Membrane.TimestampQueue
+  alias Membrane.MPEG.TS.Muxer.CorruptionError
+
+  require Membrane.Logger
 
   @queue_buffer Membrane.Time.milliseconds(200)
+
+  # PAT/PMT insertion interval per ISO/IEC 13818-1 spec (max 500ms)
+  @pat_pmt_interval Membrane.Time.milliseconds(500)
+
+  # Standard MPEG-TS system PIDs
+  @pat_pid 0x0000
+  @cat_pid 0x0001
+  @pmt_pid 0x1000
 
   def_input_pad(:input,
     accepted_format: _any,
@@ -68,7 +79,10 @@ defmodule Membrane.MPEG.TS.Muxer do
       pad_to_stream: %{},
       queue: queue,
       last_dts: nil,
-      pat_pmt_sent: false
+      last_pat_pmt_dts: nil,
+      # Track all valid PIDs that should appear in the stream
+      # Initially includes system PIDs (PAT, CAT, PMT)
+      valid_pids: MapSet.new([@pat_pid, @cat_pid, @pmt_pid])
     }
 
     {[], state}
@@ -154,23 +168,24 @@ defmodule Membrane.MPEG.TS.Muxer do
         _ -> nil
       end
 
-    # Send initial PAT/PMT if not yet sent and we have a valid DTS
-    {initial_pat_pmt_actions, state} =
-      if not state.pat_pmt_sent and current_dts != nil do
-        {actions, state} = mux_pat_pmt(state, current_dts)
-        {actions, %{state | pat_pmt_sent: true}}
-      else
-        {[], state}
-      end
-
     # Update last_dts if we have a valid one
     state = if current_dts != nil, do: %{state | last_dts: current_dts}, else: state
 
-    # For video keyframes, generate PAT/PMT separately with proper DTS
-    {keyframe_pat_pmt_actions, state} =
-      if stream.category == :video and Map.get(buffer.metadata, :is_keyframe?, false) and
-           state.last_dts != nil do
-        mux_pat_pmt(state, state.last_dts)
+    # Determine if we should send PAT/PMT based on:
+    # 1. Never sent before (last_pat_pmt_dts == nil)
+    # 2. 500ms elapsed since last send (per ISO/IEC 13818-1 spec)
+    # 3. Video keyframe (good practice for stream switching)
+    should_send_pat_pmt? =
+      current_dts != nil and
+        (state.last_pat_pmt_dts == nil or
+           current_dts - state.last_pat_pmt_dts >= @pat_pmt_interval or
+           (stream.category == :video and Map.get(buffer.metadata, :is_keyframe?, false)))
+
+    # Send PAT/PMT if needed
+    {pat_pmt_actions, state} =
+      if should_send_pat_pmt? do
+        {actions, state} = mux_pat_pmt(state, current_dts)
+        {actions, %{state | last_pat_pmt_dts: current_dts}}
       else
         {[], state}
       end
@@ -206,9 +221,17 @@ defmodule Membrane.MPEG.TS.Muxer do
         end
       end)
 
+    # Validate all muxed packets before converting to buffers
+    packets = List.wrap(packet_or_packets)
+
+    validate_packets!(
+      packets,
+      state.valid_pids,
+      "#{stream.category} stream (PID #{stream.pid})"
+    )
+
     buffers =
-      packet_or_packets
-      |> List.wrap()
+      packets
       |> Enum.map(fn x ->
         %Membrane.Buffer{
           payload: marshal_payload(x),
@@ -218,7 +241,7 @@ defmodule Membrane.MPEG.TS.Muxer do
         }
       end)
 
-    {initial_pat_pmt_actions ++ keyframe_pat_pmt_actions ++ [buffer: {:output, buffers}], state}
+    {pat_pmt_actions ++ [buffer: {:output, buffers}], state}
   end
 
   defp handle_queue_item(_, state), do: {[], state}
@@ -256,7 +279,10 @@ defmodule Membrane.MPEG.TS.Muxer do
         TS.Muxer.add_elementary_stream(muxer, stream_type, stream_opts)
       end)
 
-    Membrane.Logger.info("Binding #{inspect(pad)} to #{pid} (#{inspect(stream_type)}#{if pcr?, do: ", PCR", else: ""})")
+    Membrane.Logger.info(
+      "Binding #{inspect(pad)} to PID #{pid} (0x#{Integer.to_string(pid, 16)}) " <>
+        "for #{inspect(stream_type)}#{if pcr?, do: ", PCR", else: ""}"
+    )
 
     state =
       state
@@ -271,10 +297,12 @@ defmodule Membrane.MPEG.TS.Muxer do
         [:queue],
         &TimestampQueue.register_pad(&1, pad, wait_on_buffers?: wait_on_buffers?)
       )
+      |> update_in([:valid_pids], &MapSet.put(&1, pid))
 
-    if ctx.playback == :playing and state.pat_pmt_sent and state.last_dts != nil do
+    if ctx.playback == :playing and state.last_pat_pmt_dts != nil and state.last_dts != nil do
       # Each time a pad is added at runtime, update the PMT with current timing
-      mux_pat_pmt(state, state.last_dts)
+      {actions, state} = mux_pat_pmt(state, state.last_dts)
+      {actions, %{state | last_pat_pmt_dts: state.last_dts}}
     else
       # PAT/PMT will be sent with first media buffer
       {[], state}
@@ -301,13 +329,23 @@ defmodule Membrane.MPEG.TS.Muxer do
       pusi: packet.pusi,
       pid: packet.pid,
       rai: packet.random_access_indicator,
-      pid_class: packet.pid_class
+      pid_class: packet.pid_class || calculate_pid_class(packet.pid)
     }
   end
+
+  # Calculate pid_class based on PID value (same logic as mpeg_ts library parser)
+  # This is needed because the mpeg_ts muxer doesn't set pid_class when creating packets
+  defp calculate_pid_class(0x0000), do: :pat
+  defp calculate_pid_class(pid) when pid in 0x0020..0x1FFA or pid in 0x1FFC..0x1FFE, do: :psi
+  defp calculate_pid_class(0x1FFF), do: :null_packet
+  defp calculate_pid_class(_), do: :unsupported
 
   defp mux_pat_pmt(state, dts) do
     {pat, state} = get_and_update_in(state, [:muxer], &TS.Muxer.mux_pat(&1))
     {pmt, state} = get_and_update_in(state, [:muxer], &TS.Muxer.mux_pmt(&1))
+
+    # Validate PAT/PMT packets
+    validate_packets!([pat, pmt], state.valid_pids, "PAT/PMT")
 
     buffers =
       Enum.map([pat, pmt], fn x ->
@@ -320,5 +358,31 @@ defmodule Membrane.MPEG.TS.Muxer do
       end)
 
     {[buffer: {:output, buffers}], state}
+  end
+
+  # Validates that all packets have PIDs that were registered in the PMT.
+  # Raises CorruptionError if any invalid PIDs are found.
+  defp validate_packets!(packets, valid_pids, context) do
+    invalid_packets =
+      packets
+      |> List.wrap()
+      |> Enum.reject(fn packet ->
+        MapSet.member?(valid_pids, packet.pid)
+      end)
+
+    if invalid_packets != [] do
+      invalid_pids = Enum.map(invalid_packets, & &1.pid) |> Enum.uniq()
+
+      Membrane.Logger.error("""
+      MPEG-TS Corruption detected in #{context}!
+      Invalid PIDs: #{inspect(invalid_pids)}
+      Valid PIDs: #{inspect(MapSet.to_list(valid_pids))}
+      """)
+
+      raise CorruptionError,
+        invalid_pids: invalid_pids,
+        valid_pids: MapSet.to_list(valid_pids),
+        packet_count: length(invalid_packets)
+    end
   end
 end

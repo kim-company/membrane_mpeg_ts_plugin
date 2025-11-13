@@ -366,6 +366,194 @@ defmodule Membrane.MPEG.TS.MuxerTest do
   end
 
   @tag :tmp_dir
+  test "validates PID correctness and detects corruption", %{tmp_dir: tmp_dir} do
+    output_path = Path.join(tmp_dir, "pid_validation.ts")
+
+    spec = [
+      child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+      |> child(:demuxer, TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x100])
+      |> child({:h264, :parser}, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+      |> via_in(:input, options: [stream_type: :H264_AVC, pid: 300, pcr?: true])
+      |> get_child(:muxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x101])
+      |> child({:aac, :parser}, %Membrane.AAC.Parser{})
+      |> via_in(:input, options: [stream_type: :AAC_ADTS, pid: 301])
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Membrane.File.Sink{location: output_path})
+    ]
+
+    pid = Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, :sink)
+    :ok = Membrane.Pipeline.terminate(pid)
+
+    # Validate with tsanalyze - this is the critical corruption detection test
+    analysis = run_tsanalyze(output_path)
+
+    # Define exactly what PIDs we expect in the stream
+    expected_pids = %{
+      300 => "AVC",  # Video on PID 300
+      301 => "AAC"   # Audio on PID 301
+    }
+
+    # This is the critical test - verify ONLY expected PIDs are present
+    # If the corruption bug returns, this will catch it
+    assert_only_expected_pids(analysis, expected_pids)
+
+    # Verify service structure
+    assert_service_structure(analysis, expected_pids)
+
+    # Verify PCR is present on video stream
+    assert_pcr_valid(analysis, 300)
+
+    # Verify no transport errors
+    assert_no_errors(analysis)
+  end
+
+  @tag :tmp_dir
+  test "PAT/PMT insertion follows 500ms spec requirement", %{tmp_dir: tmp_dir} do
+    output_path = Path.join(tmp_dir, "pat_pmt_timing.ts")
+
+    spec = [
+      child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+      |> child(:demuxer, TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x100])
+      |> child({:h264, :parser}, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+      |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+      |> get_child(:muxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x101])
+      |> child({:aac, :parser}, %Membrane.AAC.Parser{})
+      |> via_in(:input, options: [stream_type: :AAC_ADTS])
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Membrane.File.Sink{location: output_path})
+    ]
+
+    pid = Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, :sink)
+    :ok = Membrane.Pipeline.terminate(pid)
+
+    # Parse the output and collect all PAT packets with timestamps
+    # Note: Filter out nil timestamps (first PAT before any media packets)
+    pat_packets =
+      output_path
+      |> MPEG.TS.Demuxer.stream_file!()
+      |> Enum.filter(fn container ->
+        container.pid == 0x0000 and container.t != nil  # PAT PID with valid timestamp
+      end)
+      |> Enum.to_list()
+
+    # Verify we have PAT packets
+    assert length(pat_packets) > 0, "No PAT packets with timestamps found in output"
+
+    # Check intervals between consecutive PAT packets
+    pat_intervals =
+      pat_packets
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.map(fn [prev, curr] -> curr.t - prev.t end)
+
+    # Per spec, PAT must be inserted at least every 500ms (500_000_000 nanoseconds)
+    max_interval = 500_000_000
+
+    # Check that no interval exceeds 500ms
+    oversized_intervals = Enum.filter(pat_intervals, fn interval -> interval > max_interval end)
+
+    assert oversized_intervals == [],
+           """
+           Found PAT intervals exceeding 500ms spec requirement:
+           #{Enum.map(oversized_intervals, fn i -> "#{div(i, 1_000_000)}ms" end) |> Enum.join(", ")}
+
+           All intervals: #{Enum.map(pat_intervals, fn i -> "#{div(i, 1_000_000)}ms" end) |> Enum.join(", ")}
+           """
+
+    # Also verify basic structure with tsanalyze
+    analysis = run_tsanalyze(output_path)
+    expected_pids = %{0x100 => "AVC", 0x101 => "AAC"}
+    assert_service_structure(analysis, expected_pids)
+    assert_no_errors(analysis)
+  end
+
+  @tag :tmp_dir
+  test "PAT/PMT insertion works for audio-only streams", %{tmp_dir: tmp_dir} do
+    output_path = Path.join(tmp_dir, "audio_only_pat_pmt.ts")
+
+    spec = [
+      child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+      |> child(:demuxer, TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x101])
+      |> child({:aac, :parser}, %Membrane.AAC.Parser{})
+      |> via_in(:input, options: [stream_type: :AAC_ADTS, pid: 0x101])
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Membrane.File.Sink{location: output_path})
+    ]
+
+    pid = Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, :sink)
+    :ok = Membrane.Pipeline.terminate(pid)
+
+    # Parse the output and collect all PAT/PMT packets
+    # First check if PAT/PMT packets exist at all
+    all_pat_packets =
+      output_path
+      |> MPEG.TS.Demuxer.stream_file!()
+      |> Enum.filter(fn container -> container.pid == 0x0000 end)
+      |> Enum.to_list()
+
+    all_pmt_packets =
+      output_path
+      |> MPEG.TS.Demuxer.stream_file!()
+      |> Enum.filter(fn container -> container.pid == 0x1000 end)
+      |> Enum.to_list()
+
+    # For audio-only streams without PCR, the demuxer cannot assign timestamps to PSI packets
+    # We verify that PAT/PMT packets exist and are frequent enough based on packet count
+    assert length(all_pat_packets) > 0, "No PAT packets found in audio-only stream"
+    assert length(all_pmt_packets) > 0, "No PMT packets found in audio-only stream"
+
+    # Get audio stream duration to calculate expected PAT/PMT count
+    audio_packets =
+      output_path
+      |> MPEG.TS.Demuxer.stream_file!()
+      |> Enum.filter(fn c -> c.pid == 0x101 and c.t != nil end)
+      |> Enum.to_list()
+
+    if length(audio_packets) > 1 do
+      first_audio_t = List.first(audio_packets).t
+      last_audio_t = List.last(audio_packets).t
+      duration_ms = div(last_audio_t - first_audio_t, 1_000_000)
+
+      # With 500ms intervals, we expect at least (duration / 500) PAT/PMT pairs
+      # Allow for off-by-one due to timing boundaries
+      expected_min_pat = max(1, div(duration_ms, 500) - 1)
+
+      assert length(all_pat_packets) >= expected_min_pat,
+             """
+             Expected at least #{expected_min_pat} PAT packets for #{duration_ms}ms stream (500ms interval),
+             but found #{length(all_pat_packets)}
+             """
+
+      assert length(all_pmt_packets) >= expected_min_pat,
+             """
+             Expected at least #{expected_min_pat} PMT packets for #{duration_ms}ms stream (500ms interval),
+             but found #{length(all_pmt_packets)}
+             """
+    end
+
+    # Verify basic structure with tsanalyze
+    analysis = run_tsanalyze(output_path)
+    expected_pids = %{0x101 => "AAC"}
+    assert_service_structure(analysis, expected_pids)
+    assert_no_errors(analysis)
+  end
+
+  @tag :tmp_dir
   test "muxer correctly handles timestamp rollover conversion", %{tmp_dir: tmp_dir} do
     output_path = Path.join(tmp_dir, "rollover_muxed.ts")
 
