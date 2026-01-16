@@ -1,6 +1,11 @@
 defmodule Membrane.MPEG.TS.Profiles do
   @moduledoc """
   Well-known stream profiles that combine stream_type, descriptors, and payload adapters.
+
+  Profiles provide a higher-level way to select or configure streams without
+  hiding the underlying PMT details. For example, `:opus_mpeg_ts` expands to
+  PES private data with an `Opus` registration descriptor and uses the Opus
+  MPEG-TS packetizer/depacketizer.
   """
 
   @profiles %{

@@ -7,6 +7,9 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   Each buffer is going to end in its own PES packet, hence NALu units must be grouped
   accordingly, as well as ADTS AAC frames.
+
+  Use `profile:` for well-known stream_type+descriptor combinations (e.g. `:opus_mpeg_ts`).
+  Custom payloads can be muxed by supplying `stream_type:` and `descriptors:`.
   """
 
   use Membrane.Filter

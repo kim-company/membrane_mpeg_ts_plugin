@@ -6,6 +6,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
   Association Table](https://en.wikipedia.org/wiki/MPEG_transport_stream#PAT)
   and [Program Mapping
   Table](https://en.wikipedia.org/wiki/MPEG_transport_stream#PMT).
+
+  Use `profile:` to select streams that require descriptors and depacketization
+  (e.g. Opus in MPEG-TS). For custom payloads, match `stream_type:` and
+  `registration_descriptor:` explicitly.
   """
   use Membrane.Filter
   require Membrane.Logger

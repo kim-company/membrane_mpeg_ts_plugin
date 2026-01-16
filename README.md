@@ -46,6 +46,13 @@ get_child(:demuxer)
 |> child(:video_sink, sink)
 ```
 
+Extract streams by profile (stream_type + descriptors + depacketizer):
+```elixir
+get_child(:demuxer)
+|> via_out(:output, options: [profile: :opus_mpeg_ts])
+|> child(:audio_sink, sink)
+```
+
 PMT notification:
 ```elixir
 assert_pipeline_notified(pid, :demuxer, {:pmt, %MPEG.TS.PMT{}})
@@ -65,6 +72,27 @@ spec = [
   |> child(:sink, %Membrane.File.Sink{location: "output.ts"})
 ]
 ```
+
+Mux with a profile (adds descriptors and packetizes payloads when needed):
+```elixir
+child(:opus_source, source)
+|> via_in(:input, options: [profile: :opus_mpeg_ts])
+|> get_child(:muxer)
+```
+
+Custom payloads via descriptors (e.g. JSON in PES private data):
+```elixir
+child(:json_source, source)
+|> via_in(:input, options: [
+  stream_type: :PES_PRIVATE_DATA,
+  descriptors: [%{tag: 0x05, data: "JSON"}]
+])
+|> get_child(:muxer)
+```
+
+Available profiles:
+- `:opus_mpeg_ts`
+- `:scte35`
 
 
 ## Copyright and License
