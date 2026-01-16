@@ -37,6 +37,18 @@ defmodule Membrane.MPEG.TS.Demuxer do
         The first stream that matches the selector will be returned.
         """
       ],
+      profile: [
+        spec: atom() | nil,
+        default: nil,
+        description: "Well-known stream profile (e.g. :opus_mpeg_ts, :scte35)."
+      ],
+      registration_descriptor: [
+        spec: String.t() | nil,
+        default: nil,
+        description: """
+        Matches a registration descriptor (tag 0x05) format identifier, e.g. "Opus".
+        """
+      ],
       stream_category: [
         spec: atom() | nil,
         default: nil,
@@ -148,7 +160,8 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   defp handle_demuxed(unit = %Container{pid: pid}, _ctx, state) do
     pads = get_in(state, [:pid_to_pads, Access.key(pid, [])])
-    buffer = ts_unit_to_buffer(unit)
+    stream = state.demuxer |> TS.Demuxer.available_streams() |> Map.get(pid)
+    buffer = ts_unit_to_buffer(unit, stream)
     discontinue? = get_in(buffer, [Access.key!(:metadata), Access.key(:discontinuity, false)])
 
     actions =
@@ -173,10 +186,21 @@ defmodule Membrane.MPEG.TS.Demuxer do
           # The user specified the PID directly.
           if Map.has_key?(avail, opts[:pid]), do: bind(pad, opts[:pid], state), else: state
 
+        opts[:profile] != nil ->
+          pid =
+            Enum.find_value(avail, fn {pid, x} ->
+              if profile_match?(x, opts[:profile]), do: pid
+            end)
+
+          if pid, do: bind(pad, pid, state), else: state
+
         opts[:stream_type] != nil ->
           pid =
             Enum.find_value(avail, fn {pid, x} ->
-              if x.stream_type == opts[:stream_type], do: pid
+              if x.stream_type == opts[:stream_type] and
+                   registration_descriptor_match?(x, opts[:registration_descriptor]) do
+                pid
+              end
             end)
 
           if pid, do: bind(pad, pid, state), else: state
@@ -184,8 +208,18 @@ defmodule Membrane.MPEG.TS.Demuxer do
         opts[:stream_category] != nil ->
           pid =
             Enum.find_value(avail, fn {pid, x} ->
-              x = TS.PMT.get_stream_category(x.stream_type)
-              if x == opts[:stream_category], do: pid
+              if stream_category_for(x) == opts[:stream_category] and
+                   registration_descriptor_match?(x, opts[:registration_descriptor]) do
+                pid
+              end
+            end)
+
+          if pid, do: bind(pad, pid, state), else: state
+
+        opts[:registration_descriptor] != nil ->
+          pid =
+            Enum.find_value(avail, fn {pid, x} ->
+              if registration_descriptor_match?(x, opts[:registration_descriptor]), do: pid
             end)
 
           if pid, do: bind(pad, pid, state), else: state
@@ -222,7 +256,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
             |> Map.fetch!(pid)
 
           format = %Membrane.RemoteStream{
-            content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: stream.stream_type}
+            content_format: %Membrane.MPEG.TS.StreamFormat{
+              stream_type: stream.stream_type,
+              descriptors: stream.descriptors
+            }
           }
 
           {:stream_format, {pad, format}}
@@ -232,9 +269,11 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {actions, state}
   end
 
-  defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}}) do
+  defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}}, stream) do
+    payload = maybe_depacketize_opus(x.data, stream)
+
     %Membrane.Buffer{
-      payload: x.data,
+      payload: payload,
       pts: x.pts,
       dts: x.dts,
       metadata: %{
@@ -245,7 +284,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
     }
   end
 
-  defp ts_unit_to_buffer(%Container{payload: x = %TS.PSI{}, t: t}) do
+  defp ts_unit_to_buffer(%Container{payload: x = %TS.PSI{}, t: t}, _stream) do
     %Membrane.Buffer{
       payload: TS.Marshaler.marshal(x),
       dts: t,
@@ -253,5 +292,70 @@ defmodule Membrane.MPEG.TS.Demuxer do
         psi: x
       }
     }
+  end
+
+  defp registration_descriptor_match?(_stream, nil), do: true
+
+  defp registration_descriptor_match?(%{descriptors: descriptors}, format_identifier) do
+    Enum.any?(descriptors, fn
+      %{tag: 0x05, data: ^format_identifier} -> true
+      _ -> false
+    end)
+  end
+
+  defp registration_descriptor_match?(_stream, _format_identifier), do: false
+
+  defp stream_category_for(stream) do
+    case resolve_profile_for_stream(stream) do
+      %{stream_category: category} -> category
+      _ -> TS.PMT.get_stream_category(stream.stream_type)
+    end
+  end
+
+  defp resolve_profile_for_stream(stream) do
+    Enum.find_value(Membrane.MPEG.TS.Profiles.list(), fn profile ->
+      profile_data = Membrane.MPEG.TS.Profiles.fetch!(profile)
+
+      if stream.stream_type == profile_data.stream_type and
+           descriptors_match?(stream.descriptors, profile_data.descriptors) do
+        profile_data
+      else
+        false
+      end
+    end)
+  end
+
+  defp profile_match?(stream, profile) do
+    profile_data = Membrane.MPEG.TS.Profiles.fetch!(profile)
+    stream.stream_type == profile_data.stream_type and
+      descriptors_match?(stream.descriptors, profile_data.descriptors)
+  end
+
+  defp descriptors_match?(_stream_descriptors, nil), do: true
+
+  defp descriptors_match?(stream_descriptors, required_descriptors) do
+    Enum.all?(required_descriptors, fn required ->
+      Enum.any?(stream_descriptors, &(&1 == required))
+    end)
+  end
+
+  defp maybe_depacketize_opus(payload, stream) do
+    case resolve_profile_for_stream(stream) do
+      %{packetizer: nil} ->
+        payload
+
+      %{packetizer: packetizer} ->
+        case packetizer.depacketize(payload) do
+          {:ok, raw} ->
+            raw
+
+          {:error, reason} ->
+            Membrane.Logger.warning("Failed to depacketize payload: #{inspect(reason)}")
+            payload
+        end
+
+      _ ->
+        payload
+    end
   end
 end

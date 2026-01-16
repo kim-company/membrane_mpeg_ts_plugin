@@ -38,6 +38,11 @@ defmodule Membrane.MPEG.TS.Muxer do
         See MPEG.TS.PMT.
         """
       ],
+      profile: [
+        spec: atom() | nil,
+        default: nil,
+        description: "Well-known stream profile (e.g. :opus_mpeg_ts, :scte35)."
+      ],
       pid: [
         spec: pos_integer() | nil,
         default: nil,
@@ -49,6 +54,11 @@ defmodule Membrane.MPEG.TS.Muxer do
         spec: boolean(),
         default: true,
         description: "Block muxer until a buffer on this pad arrives."
+      ],
+      descriptors: [
+        spec: list(),
+        default: [],
+        description: "List of ES descriptors to add to the PMT for this stream."
       ],
       pcr?: [
         spec: boolean(),
@@ -92,12 +102,15 @@ defmodule Membrane.MPEG.TS.Muxer do
   def handle_stream_format(
         pad,
         %Membrane.RemoteStream{
-          content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: stream_type}
+          content_format: %Membrane.MPEG.TS.StreamFormat{
+            stream_type: stream_type,
+            descriptors: descriptors
+          }
         },
         ctx,
         state
       ) do
-    handle_stream(pad, stream_type, ctx, state)
+    handle_stream(pad, stream_type, ctx, state, descriptors)
   end
 
   def handle_stream_format(pad, _format, _ctx, state) when is_map_key(state.pad_to_stream, pad) do
@@ -128,7 +141,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   @impl true
   def handle_pad_added(pad, ctx, state) do
     stream_type = ctx.pad_options[:stream_type]
-    handle_stream(pad, stream_type, ctx, state)
+    handle_stream(pad, stream_type, ctx, state, [])
   end
 
   @impl true
@@ -157,8 +170,10 @@ defmodule Membrane.MPEG.TS.Muxer do
     {suggested_actions ++ actions ++ maybe_end_of_stream(ctx, state), state}
   end
 
-  defp handle_queue_item({pad, {:buffer, buffer}}, state) do
+  defp handle_queue_item({pad, {:buffer, %Membrane.Buffer{} = buffer}}, state) do
     stream = get_in(state, [:pad_to_stream, pad])
+    payload = maybe_packetize(buffer.payload, stream)
+    buffer = %Membrane.Buffer{buffer | payload: payload}
 
     # Extract DTS from buffer (use buffer.dts for video, buffer.pts for audio)
     current_dts =
@@ -246,66 +261,78 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   defp handle_queue_item(_, state), do: {[], state}
 
-  # We have to stream_type information, we'll wait for the stream_format event.
-  defp handle_stream(_pad, nil, _ctx, state), do: {[], state}
-
   # The stream has already been added.
-  defp handle_stream(pad, _stream_format, _ctx, state)
+  defp handle_stream(pad, _stream_format, _ctx, state, _format_descriptors)
        when is_map_key(state.pad_to_stream, pad),
        do: {[], state}
 
-  defp handle_stream(pad, stream_type, ctx, state) do
-    stream_category = TS.PMT.get_stream_category(stream_type)
-    wait_on_buffers? = ctx.pads[pad].options[:wait_on_buffers?]
-    pcr? = ctx.pads[pad].options[:pcr?]
-
-    {pid, state} =
-      get_and_update_in(state, [:muxer], fn muxer ->
-        program_info =
-          case stream_type do
-            :SCTE_35_SPLICE -> [%{tag: 5, data: "CUEI"}]
-            _ -> []
-          end
-
-        pid = ctx.pads[pad].options[:pid]
-
-        stream_opts =
-          List.flatten([
-            [program_info: program_info],
-            if(pid != nil, do: [pid: pid], else: []),
-            if(pcr?, do: [pcr?: true], else: [])
-          ])
-
-        TS.Muxer.add_elementary_stream(muxer, stream_type, stream_opts)
-      end)
-
-    Membrane.Logger.info(
-      "Binding #{inspect(pad)} to PID #{pid} (0x#{Integer.to_string(pid, 16)}) " <>
-        "for #{inspect(stream_type)}#{if pcr?, do: ", PCR", else: ""}"
-    )
-
-    state =
-      state
-      |> put_in([:pad_to_stream, pad], %{
-        pid: pid,
-        type: stream_type,
-        category: stream_category,
-        wait_on_buffers?: wait_on_buffers?,
-        pcr?: pcr?
-      })
-      |> update_in(
-        [:queue],
-        &TimestampQueue.register_pad(&1, pad, wait_on_buffers?: wait_on_buffers?)
-      )
-      |> update_in([:valid_pids], &MapSet.put(&1, pid))
-
-    if ctx.playback == :playing and state.last_pat_pmt_dts != nil and state.last_dts != nil do
-      # Each time a pad is added at runtime, update the PMT with current timing
-      {actions, state} = mux_pat_pmt(state, state.last_dts)
-      {actions, %{state | last_pat_pmt_dts: state.last_dts}}
-    else
-      # PAT/PMT will be sent with first media buffer
+  defp handle_stream(pad, stream_type, ctx, state, format_descriptors) do
+    profile_data = resolve_profile(ctx.pads[pad].options[:profile])
+    stream_type = stream_type || profile_data[:stream_type]
+    if stream_type == nil do
       {[], state}
+    else
+      descriptors =
+        merge_descriptors(
+          profile_data[:descriptors],
+          merge_descriptors(format_descriptors, ctx.pads[pad].options[:descriptors])
+        )
+
+      stream_category = profile_data[:stream_category] || TS.PMT.get_stream_category(stream_type)
+      wait_on_buffers? = ctx.pads[pad].options[:wait_on_buffers?]
+      pcr? = ctx.pads[pad].options[:pcr?]
+
+      {pid, state} =
+        get_and_update_in(state, [:muxer], fn muxer ->
+          program_info =
+            case stream_type do
+              :SCTE_35_SPLICE -> [%{tag: 5, data: "CUEI"}]
+              _ -> []
+            end
+
+          pid = ctx.pads[pad].options[:pid]
+
+          stream_opts =
+            List.flatten([
+              [program_info: program_info],
+              if(pid != nil, do: [pid: pid], else: []),
+              if(pcr?, do: [pcr?: true], else: []),
+              if(descriptors != [], do: [descriptors: descriptors], else: [])
+            ])
+
+          TS.Muxer.add_elementary_stream(muxer, stream_type, stream_opts)
+        end)
+
+      Membrane.Logger.info(
+        "Binding #{inspect(pad)} to PID #{pid} (0x#{Integer.to_string(pid, 16)}) " <>
+          "for #{inspect(stream_type)}#{if pcr?, do: ", PCR", else: ""}"
+      )
+
+      state =
+        state
+        |> put_in([:pad_to_stream, pad], %{
+          pid: pid,
+          type: stream_type,
+          category: stream_category,
+          wait_on_buffers?: wait_on_buffers?,
+          pcr?: pcr?,
+          packetizer: profile_data[:packetizer],
+          descriptors: descriptors
+        })
+        |> update_in(
+          [:queue],
+          &TimestampQueue.register_pad(&1, pad, wait_on_buffers?: wait_on_buffers?)
+        )
+        |> update_in([:valid_pids], &MapSet.put(&1, pid))
+
+      if ctx.playback == :playing and state.last_pat_pmt_dts != nil and state.last_dts != nil do
+        # Each time a pad is added at runtime, update the PMT with current timing
+        {actions, state} = mux_pat_pmt(state, state.last_dts)
+        {actions, %{state | last_pat_pmt_dts: state.last_dts}}
+      else
+        # PAT/PMT will be sent with first media buffer
+        {[], state}
+      end
     end
   end
 
@@ -322,6 +349,27 @@ defmodule Membrane.MPEG.TS.Muxer do
     packet
     |> TS.Marshaler.marshal()
     |> IO.iodata_to_binary()
+  end
+
+  defp maybe_packetize(payload, %{packetizer: nil}), do: payload
+
+  defp maybe_packetize(payload, %{packetizer: packetizer}) do
+    packetizer.packetize(payload)
+  end
+
+  defp resolve_profile(nil), do: %{}
+
+  defp resolve_profile(profile) do
+    case Membrane.MPEG.TS.Profiles.fetch(profile) do
+      {:ok, data} -> data
+      :error -> raise RuntimeError, "Unknown MPEG-TS profile: #{inspect(profile)}"
+    end
+  end
+
+  defp merge_descriptors(profile_descriptors, descriptors) do
+    profile_descriptors = profile_descriptors || []
+    descriptors = descriptors || []
+    profile_descriptors ++ descriptors
   end
 
   defp extract_metadata(packet) do
