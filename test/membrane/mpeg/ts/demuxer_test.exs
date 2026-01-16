@@ -198,6 +198,40 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     assert_files_equal(aac_out, "test/data/avsync.aac")
   end
 
+  @tag :tmp_dir
+  test "demuxes Opus stream by stream_type", %{tmp_dir: tmp_dir} do
+    ts_out = Path.join(tmp_dir, "opus.ts")
+    opus_payload = <<1, 2, 3, 4, 5, 6, 7, 8>>
+
+    muxer = MPEG.TS.Muxer.new()
+    {pid, muxer} = MPEG.TS.Muxer.add_elementary_stream(muxer, :OPUS)
+    {pat, muxer} = MPEG.TS.Muxer.mux_pat(muxer)
+    {pmt, muxer} = MPEG.TS.Muxer.mux_pmt(muxer)
+    {packets, _muxer} = MPEG.TS.Muxer.mux_sample(muxer, pid, opus_payload, 0, sync?: true)
+
+    data = MPEG.TS.Marshaler.marshal([pat, pmt | packets]) |> IO.iodata_to_binary()
+    File.write!(ts_out, data)
+
+    spec = [
+      child(:source, %Membrane.File.Source{
+        location: ts_out
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :OPUS])
+      |> child(:sink, Membrane.Testing.Sink)
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pid, :demuxer, {:pmt, %MPEG.TS.PMT{}})
+    assert_sink_stream_format(pid, :sink, %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: :OPUS}
+    })
+    assert_sink_buffer(pid, :sink, %Membrane.Buffer{payload: ^opus_payload})
+    assert_end_of_stream(pid, :sink, :input)
+    :ok = Testing.Pipeline.terminate(pid)
+  end
+
   test "demuxes SCTE35 data" do
     spec = [
       child(:source, %Membrane.File.Source{
