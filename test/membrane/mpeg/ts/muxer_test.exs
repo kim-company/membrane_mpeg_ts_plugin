@@ -12,6 +12,37 @@ defmodule Membrane.MPEG.TS.MuxerTest do
     JSON.decode!(output)
   end
 
+  defp assert_ffprobe_streams(file_path, expected_codecs) do
+    ffprobe = System.find_executable("ffprobe")
+    if ffprobe == nil do
+      IO.warn("ffprobe not available, skipping ffprobe validation")
+      :ok
+    else
+      {output, 0} =
+        System.cmd(ffprobe, [
+          "-v",
+          "error",
+          "-show_entries",
+          "stream=codec_type,codec_name",
+          "-of",
+          "json",
+          file_path
+        ])
+
+      %{"streams" => streams} = JSON.decode!(output)
+
+      codec_set =
+        streams
+        |> Enum.map(fn %{"codec_type" => type, "codec_name" => name} -> "#{type}:#{name}" end)
+        |> MapSet.new()
+
+      for codec <- expected_codecs do
+        assert MapSet.member?(codec_set, codec),
+               "ffprobe did not report expected stream #{codec}. Got: #{inspect(codec_set)}"
+      end
+    end
+  end
+
   # Validate service/PID structure
   defp assert_service_structure(analysis, expected_pids) do
     pids = analysis["pids"] || []
@@ -246,6 +277,114 @@ defmodule Membrane.MPEG.TS.MuxerTest do
     assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{payload: ^json_2})
     assert_end_of_stream(demux_pid, :sink, :input)
     :ok = Testing.Pipeline.terminate(demux_pid)
+  end
+
+  @tag :tmp_dir
+  test "muxes, demuxes and parses audio+video+JSON", %{tmp_dir: tmp_dir} do
+    output_path = Path.join(tmp_dir, "av_json.ts")
+
+    json_1 = ~s({"text":"hello","from":0,"to":1000})
+    json_2 = ~s({"text":"world","from":1000,"to":2000})
+
+    json_buffers = [
+      %Membrane.Buffer{payload: json_1, pts: Membrane.Time.seconds(5)},
+      %Membrane.Buffer{payload: json_2, pts: Membrane.Time.seconds(6)}
+    ]
+
+    spec = [
+      child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+      |> child(:demuxer, TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x100])
+      |> child({:h264, :parser}, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+      |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+      |> get_child(:muxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x101])
+      |> child({:aac, :parser}, %Membrane.AAC.Parser{})
+      |> via_in(:input, options: [stream_type: :AAC_ADTS])
+      |> get_child(:muxer),
+      child(:json_source, %Membrane.Testing.Source{output: json_buffers})
+      |> via_in(:input,
+        options: [
+          stream_type: :PES_PRIVATE_DATA,
+          descriptors: [%{tag: 0x05, data: "JSON"}],
+          wait_on_buffers?: false
+        ]
+      )
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Membrane.File.Sink{location: output_path})
+    ]
+
+    pid = Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, :sink)
+    :ok = Membrane.Pipeline.terminate(pid)
+
+    assert_ffprobe_streams(output_path, ["video:h264", "audio:aac"])
+
+    demux_spec = [
+      child(:source, %Membrane.File.Source{location: output_path})
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :H264_AVC])
+      |> child(:h264_sink, %Membrane.Testing.Sink{}),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :AAC_ADTS])
+      |> child(:aac_sink, %Membrane.Testing.Sink{}),
+      get_child(:demuxer)
+      |> via_out(:output,
+        options: [stream_type: :PES_PRIVATE_DATA, registration_descriptor: "JSON"]
+      )
+      |> child(:json_sink, %Membrane.Testing.Sink{})
+    ]
+
+    demux_pid = Testing.Pipeline.start_link_supervised!(spec: demux_spec)
+
+    assert_sink_stream_format(demux_pid, :h264_sink, %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: :H264_AVC}
+    })
+
+    assert_sink_stream_format(demux_pid, :aac_sink, %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: :AAC_ADTS}
+    })
+
+    assert_sink_stream_format(demux_pid, :json_sink, %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{
+        stream_type: :PES_PRIVATE_DATA,
+        descriptors: [%{tag: 0x05, data: "JSON"}]
+      }
+    })
+
+    assert_sink_buffer(demux_pid, :h264_sink, %Membrane.Buffer{})
+    assert_sink_buffer(demux_pid, :aac_sink, %Membrane.Buffer{})
+    assert_sink_buffer(demux_pid, :json_sink, %Membrane.Buffer{payload: ^json_1})
+    assert_sink_buffer(demux_pid, :json_sink, %Membrane.Buffer{payload: ^json_2})
+
+    assert_end_of_stream(demux_pid, :h264_sink, :input)
+    assert_end_of_stream(demux_pid, :aac_sink, :input)
+    assert_end_of_stream(demux_pid, :json_sink, :input)
+    :ok = Testing.Pipeline.terminate(demux_pid)
+
+    parse_spec = [
+      child(:source, %Membrane.File.Source{location: output_path})
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :H264_AVC])
+      |> child({:h264_out, :parser}, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+      |> child(:h264_parsed_sink, %Membrane.Testing.Sink{}),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :AAC_ADTS])
+      |> child({:aac_out, :parser}, %Membrane.AAC.Parser{})
+      |> child(:aac_parsed_sink, %Membrane.Testing.Sink{})
+    ]
+
+    parse_pid = Testing.Pipeline.start_link_supervised!(spec: parse_spec)
+    assert_sink_buffer(parse_pid, :h264_parsed_sink, %Membrane.Buffer{})
+    assert_sink_buffer(parse_pid, :aac_parsed_sink, %Membrane.Buffer{})
+    assert_end_of_stream(parse_pid, :h264_parsed_sink, :input)
+    assert_end_of_stream(parse_pid, :aac_parsed_sink, :input)
+    :ok = Testing.Pipeline.terminate(parse_pid)
   end
 
   @tag :tmp_dir
