@@ -34,6 +34,59 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     })
   end
 
+  test "gates non-video until first video RAI when enabled" do
+    output_path = Path.join(System.tmp_dir!(), "gate_av.ts")
+
+    video_buffers = [
+      %Membrane.Buffer{
+        payload: <<1, 2, 3>>,
+        pts: Membrane.Time.seconds(5),
+        metadata: %{is_keyframe?: true}
+      }
+    ]
+
+    audio_buffers = [
+      %Membrane.Buffer{payload: <<4, 5, 6>>, pts: Membrane.Time.seconds(0)},
+      %Membrane.Buffer{payload: <<7, 8, 9>>, pts: Membrane.Time.seconds(6)}
+    ]
+
+    spec = [
+      child(:video_source, %Membrane.Testing.Source{output: video_buffers})
+      |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+      |> get_child(:muxer),
+      child(:audio_source, %Membrane.Testing.Source{output: audio_buffers})
+      |> via_in(:input, options: [stream_type: :AAC_ADTS])
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Membrane.File.Sink{location: output_path})
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, :sink)
+    :ok = Membrane.Pipeline.terminate(pid)
+
+    demux_spec = [
+      child(:source, %Membrane.File.Source{location: output_path})
+      |> child(:demuxer, %Membrane.MPEG.TS.Demuxer{drop_until_video_rai?: true}),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :H264_AVC])
+      |> child({:sink, :h264}, %Membrane.Testing.Sink{}),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :AAC_ADTS])
+      |> child({:sink, :aac}, %Membrane.Testing.Sink{})
+    ]
+
+    demux_pid = Testing.Pipeline.start_link_supervised!(spec: demux_spec)
+
+    assert_sink_buffer(demux_pid, {:sink, :h264}, %Membrane.Buffer{pts: video_pts})
+    assert_sink_buffer(demux_pid, {:sink, :aac}, %Membrane.Buffer{pts: audio_pts})
+    assert audio_pts >= video_pts
+
+    assert_end_of_stream(demux_pid, {:sink, :h264}, :input)
+    assert_end_of_stream(demux_pid, {:sink, :aac}, :input)
+    :ok = Testing.Pipeline.terminate(demux_pid)
+  end
+
   test "drops packets until PAT/PMT is available" do
     muxer = TS.Muxer.new()
     {pid, muxer} = TS.Muxer.add_elementary_stream(muxer, :H264_AVC, pid: 0x100)

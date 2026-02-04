@@ -73,16 +73,30 @@ defmodule Membrane.MPEG.TS.Demuxer do
     wait_rai?: [
       spec: boolean(),
       default: true,
-      desciption: "If true, first packet buffer is going to be a keyframe (in case of video)"
+      description: "If true, first packet buffer is going to be a keyframe (in case of video)"
+    ],
+    drop_until_video_rai?: [
+      spec: boolean(),
+      default: false,
+      description:
+        "If true, drop all non-video buffers until the first video buffer (RAI) arrives"
     ]
   )
 
   @impl true
   def handle_init(_ctx, opts) do
     state = %{
-      demuxer: TS.Demuxer.new(strict?: opts.strict?, wait_rai?: opts.wait_rai?),
+      demuxer:
+        TS.Demuxer.new(
+          strict?: Map.get(opts, :strict?, false),
+          wait_rai?: Map.get(opts, :wait_rai?, true)
+        ),
       subscribers: %{},
-      pid_to_pads: %{}
+      pid_to_pads: %{},
+      pid_to_stream_category: %{},
+      has_video_stream?: false,
+      drop_until_video_rai?: Map.get(opts, :drop_until_video_rai?, false),
+      video_started?: false
     }
 
     {[], state}
@@ -168,11 +182,27 @@ defmodule Membrane.MPEG.TS.Demuxer do
     buffer = ts_unit_to_buffer(unit, stream)
     discontinue? = get_in(buffer, [Access.key!(:metadata), Access.key(:discontinuity, false)])
 
-    actions =
-      Enum.flat_map(pads, fn pad ->
-        extras = if discontinue?, do: [{:event, {pad, %Membrane.Event.Discontinuity{}}}], else: []
-        extras ++ [{:buffer, {pad, buffer}}]
-      end)
+    {actions, state} =
+      if drop_until_video?(state, pid, stream) do
+        {[], state}
+      else
+        state =
+          if video_stream?(state, pid, stream) do
+            %{state | video_started?: true}
+          else
+            state
+          end
+
+        actions =
+          Enum.flat_map(pads, fn pad ->
+            extras =
+              if discontinue?, do: [{:event, {pad, %Membrane.Event.Discontinuity{}}}], else: []
+
+            extras ++ [{:buffer, {pad, buffer}}]
+          end)
+
+        {actions, state}
+      end
 
     {actions, state}
   end
@@ -239,12 +269,16 @@ defmodule Membrane.MPEG.TS.Demuxer do
     info = Map.fetch!(avail, pid)
     Membrane.Logger.info("Binding #{inspect(pad)} to #{pid} (#{inspect(info.stream_type)})")
 
+    category = TS.PMT.get_stream_category(info.stream_type)
+
     state
     |> update_in([:pid_to_pads, pid], fn
       nil -> [pad]
       acc -> [pad | acc]
     end)
     |> put_in([:subscribers, pad, :bound], true)
+    |> update_in([:pid_to_stream_category], &Map.put(&1, pid, category))
+    |> update_in([:has_video_stream?], &(&1 or category == :video))
   end
 
   defp maybe_forward_stream_format(ctx, state) do
@@ -309,6 +343,21 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   defp registration_descriptor_match?(_stream, _format_identifier), do: false
 
+  defp drop_until_video?(%{drop_until_video_rai?: false}, _pid, _stream), do: false
+
+  defp drop_until_video?(%{video_started?: true}, _pid, _stream), do: false
+
+  defp drop_until_video?(state, pid, stream) do
+    state.has_video_stream? and not video_stream?(state, pid, stream)
+  end
+
+  defp video_stream?(_state, _pid, nil), do: false
+
+  defp video_stream?(state, pid, stream) do
+    Map.get(state.pid_to_stream_category, pid, TS.PMT.get_stream_category(stream.stream_type)) ==
+      :video
+  end
+
   defp stream_category_for(stream) do
     case resolve_profile_for_stream(stream) do
       %{stream_category: category} -> category
@@ -331,6 +380,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   defp profile_match?(stream, profile) do
     profile_data = Membrane.MPEG.TS.Profiles.fetch!(profile)
+
     stream.stream_type == profile_data.stream_type and
       descriptors_match?(stream.descriptors, profile_data.descriptors)
   end
