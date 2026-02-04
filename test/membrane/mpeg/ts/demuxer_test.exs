@@ -4,6 +4,7 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
   import Membrane.Testing.Assertions
   import Membrane.ChildrenSpec
   alias Membrane.Testing
+  alias MPEG.TS
 
   test "content_format contains the correct format" do
     spec = [
@@ -31,6 +32,39 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     assert_sink_stream_format(pid, {:sink, :aac}, %Membrane.RemoteStream{
       content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: :AAC_ADTS}
     })
+  end
+
+  test "drops packets until PAT/PMT is available" do
+    muxer = TS.Muxer.new()
+    {pid, muxer} = TS.Muxer.add_elementary_stream(muxer, :H264_AVC, pid: 0x100)
+    {pat, muxer} = TS.Muxer.mux_pat(muxer)
+    {pmt, muxer} = TS.Muxer.mux_pmt(muxer)
+    {pes_packets, _muxer} = TS.Muxer.mux_sample(muxer, pid, <<1, 2, 3, 4>>, 0, sync?: true)
+
+    pre_pmt = hd(pes_packets)
+
+    payload =
+      [pre_pmt, pat, pmt | pes_packets]
+      |> Enum.map(&TS.Marshaler.marshal/1)
+      |> IO.iodata_to_binary()
+
+    spec = [
+      child(:source, %Membrane.Testing.Source{
+        output: [%Membrane.Buffer{payload: payload}]
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :H264_AVC])
+      |> child(:sink, %Membrane.Testing.Sink{})
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_sink_stream_format(pid, :sink, %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: :H264_AVC}
+    })
+    assert_sink_buffer(pid, :sink, %Membrane.Buffer{})
+    assert_end_of_stream(pid, :sink, :input)
+    :ok = Membrane.Pipeline.terminate(pid)
   end
 
   test "correctly handles the mpegts rollover and converts it into monotonic pts/dts" do
