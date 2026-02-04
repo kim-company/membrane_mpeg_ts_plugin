@@ -2,6 +2,7 @@ defmodule Membrane.MPEG.TS.MuxerTest do
   use ExUnit.Case, async: true
   import Membrane.Testing.Assertions
   import Membrane.ChildrenSpec
+  alias Membrane.Testing
   require Membrane.Pad
   alias Membrane.MPEG.TS
 
@@ -187,6 +188,67 @@ defmodule Membrane.MPEG.TS.MuxerTest do
   end
 
   @tag :tmp_dir
+  test "muxes and demuxes JSON private data", %{tmp_dir: tmp_dir} do
+    output_path = Path.join(tmp_dir, "json.ts")
+
+    json_1 = ~s({"text":"hello","from":0,"to":1000})
+    json_2 = ~s({"text":"world","from":1000,"to":2000})
+
+    buffers = [
+      %Membrane.Buffer{payload: json_1, pts: Membrane.Time.seconds(5)},
+      %Membrane.Buffer{payload: json_2, pts: Membrane.Time.seconds(6)}
+    ]
+
+    spec = [
+      child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+      |> child(:demuxer, TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [pid: 0x100])
+      |> child({:h264, :parser}, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+      |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+      |> get_child(:muxer),
+      child(:json_source, %Membrane.Testing.Source{output: buffers})
+      |> via_in(:input,
+        options: [
+          stream_type: :PES_PRIVATE_DATA,
+          descriptors: [%{tag: 0x05, data: "JSON"}],
+          wait_on_buffers?: false
+        ]
+      )
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Membrane.File.Sink{location: output_path})
+    ]
+
+    pid = Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, :sink)
+    :ok = Membrane.Pipeline.terminate(pid)
+
+    demux_spec = [
+      child(:source, %Membrane.File.Source{location: output_path})
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :PES_PRIVATE_DATA])
+      |> child(:sink, %Membrane.Testing.Sink{})
+    ]
+
+    demux_pid = Testing.Pipeline.start_link_supervised!(spec: demux_spec)
+    assert_pipeline_notified(demux_pid, :demuxer, {:pmt, %MPEG.TS.PMT{}})
+
+    assert_sink_stream_format(demux_pid, :sink, %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{
+        stream_type: :PES_PRIVATE_DATA,
+        descriptors: [%{tag: 0x05, data: "JSON"}]
+      }
+    })
+
+    assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{payload: ^json_1})
+    assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{payload: ^json_2})
+    assert_end_of_stream(demux_pid, :sink, :input)
+    :ok = Testing.Pipeline.terminate(demux_pid)
+  end
+
+  @tag :tmp_dir
   test "re-muxes avsync video, w/o specifying the stream_type", %{tmp_dir: tmp_dir} do
     output_path = Path.join(tmp_dir, "output.ts")
 
@@ -363,6 +425,111 @@ defmodule Membrane.MPEG.TS.MuxerTest do
 
     # Verify no transport errors
     assert_no_errors(analysis)
+  end
+
+  @tag :tmp_dir
+  test "muxes and demuxes SCTE-35 as PSI", %{tmp_dir: tmp_dir} do
+    output_path = Path.join(tmp_dir, "scte35_psi.ts")
+
+    splice_insert = %MPEG.TS.SCTE35.SpliceInsert{
+      event_id: 100,
+      cancel_indicator: 0,
+      out_of_network_indicator: 1,
+      program_splice_flag: 1,
+      duration_flag: 1,
+      splice_immediate_flag: 0,
+      event_id_compliance_flag: 1,
+      splice_time: %{pts: Membrane.Time.seconds(60)},
+      break_duration: %{auto_return: 0, duration: Membrane.Time.seconds(60)},
+      unique_program_id: 1,
+      avail_num: 18,
+      avails_expected: 255
+    }
+
+    scte35 = %MPEG.TS.SCTE35{
+      protocol_version: 0,
+      encrypted_packet: 0,
+      encryption_algorithm: 0,
+      pts_adjustment: 0,
+      cw_index: 0,
+      tier: 0xFFF,
+      splice_command_type: :splice_insert,
+      splice_command: splice_insert,
+      splice_descriptors: [],
+      e_crc32: <<>>
+    }
+
+    psi = %MPEG.TS.PSI{
+      header: %{
+        table_id: 0xFC,
+        section_syntax_indicator: false,
+        transport_stream_id: nil,
+        version_number: nil,
+        current_next_indicator: nil,
+        section_number: nil,
+        last_section_number: nil
+      },
+      table_type: :scte35,
+      table: scte35,
+      crc: <<>>
+    }
+
+    buffers = [
+      %Membrane.Buffer{
+        payload: <<>>,
+        pts: Membrane.Time.seconds(5),
+        metadata: %{psi: psi}
+      }
+    ]
+
+    spec = [
+      child(:scte_source, %Membrane.Testing.Source{output: buffers})
+      |> via_in(:input,
+        options: [
+          stream_type: :SCTE_35_SPLICE,
+          pid: 500,
+          wait_on_buffers?: false
+        ]
+      )
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Membrane.File.Sink{location: output_path})
+    ]
+
+    pid = Membrane.Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_end_of_stream(pid, :sink)
+    :ok = Membrane.Pipeline.terminate(pid)
+
+    demux_spec = [
+      child(:source, %Membrane.File.Source{location: output_path})
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :SCTE_35_SPLICE])
+      |> child(:sink, %Membrane.Testing.Sink{})
+    ]
+
+    demux_pid = Testing.Pipeline.start_link_supervised!(spec: demux_spec)
+
+    assert_sink_stream_format(demux_pid, :sink, %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{
+        stream_type: :SCTE_35_SPLICE
+      }
+    })
+
+    assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{
+      metadata: %{
+        psi: %MPEG.TS.PSI{
+          table_type: :scte35,
+          table: %MPEG.TS.SCTE35{
+            splice_command_type: :splice_insert,
+            splice_command: %MPEG.TS.SCTE35.SpliceInsert{event_id: 100}
+          }
+        }
+      }
+    })
+
+    assert_end_of_stream(demux_pid, :sink, :input)
+    :ok = Testing.Pipeline.terminate(demux_pid)
   end
 
   @tag :tmp_dir

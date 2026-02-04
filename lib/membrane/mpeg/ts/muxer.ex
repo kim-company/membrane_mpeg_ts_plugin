@@ -183,7 +183,7 @@ defmodule Membrane.MPEG.TS.Muxer do
       case stream.category do
         :video -> buffer.dts || buffer.pts
         :audio -> buffer.pts
-        _ -> nil
+        _ -> buffer.dts || buffer.pts
       end
 
     # Update last_dts if we have a valid one
@@ -225,16 +225,23 @@ defmodule Membrane.MPEG.TS.Muxer do
             TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts, sync?: true)
 
           _ ->
-            psi = get_in(buffer, [Access.key!(:metadata), :psi])
+            stream_info = %{stream_type: stream.type, descriptors: stream.descriptors}
 
-            if psi != nil do
-              TS.Muxer.mux_psi(muxer, stream.pid, psi)
+            if TS.PMT.pes_stream?(stream_info) do
+              TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts, sync?: true)
             else
-              Membrane.Logger.warning(
-                "Could not mux packet on stream #{inspect(stream)}: expected buffer.metadata.psi"
-              )
+              psi = get_in(buffer, [Access.key!(:metadata), :psi])
 
-              {[], muxer}
+              if psi != nil do
+                TS.Muxer.mux_psi(muxer, stream.pid, psi)
+              else
+                Membrane.Logger.warning(
+                  "Could not mux non-PES stream #{inspect(stream.type)} on PID #{stream.pid}: " <>
+                    "expected buffer.metadata.psi"
+                )
+
+                {[], muxer}
+              end
             end
         end
       end)
