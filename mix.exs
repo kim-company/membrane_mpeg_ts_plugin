@@ -46,7 +46,6 @@ defmodule Membrane.MPEG.TS.MixProject do
       {:membrane_timestamp_queue, "~> 0.2.2"},
       {:membrane_h264_format, "~> 0.6"},
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
-      {:membrane_nalu_plugin, "~> 0.1", only: :test},
       {:membrane_aac_plugin, "~> 0.19.1", only: :test},
       {:membrane_h26x_plugin, "~> 0.10", only: :test},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
