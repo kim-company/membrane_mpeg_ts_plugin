@@ -116,6 +116,10 @@ defmodule Membrane.MPEG.TS.Muxer do
     handle_stream(pad, stream_type, ctx, state, descriptors)
   end
 
+  def handle_stream_format(pad, %Membrane.H264{}, ctx, state) do
+    handle_stream(pad, :H264_AVC, ctx, state, [])
+  end
+
   def handle_stream_format(pad, _format, _ctx, state) when is_map_key(state.pad_to_stream, pad) do
     {[], state}
   end
@@ -173,6 +177,14 @@ defmodule Membrane.MPEG.TS.Muxer do
     {suggested_actions ++ actions ++ maybe_end_of_stream(ctx, state), state}
   end
 
+  # Match H264.Parser metadata
+  defp best_effort_is_keyframe?(%Membrane.Buffer{metadata: %{h264: %{key_frame?: flag}}}),
+    do: flag
+
+  # Match NALU.ParserBin metadata
+  defp best_effort_is_keyframe?(%Membrane.Buffer{metadata: %{is_keyframe?: flag}}), do: flag
+  defp best_effort_is_keyframe?(_), do: false
+
   defp handle_queue_item({pad, {:buffer, %Membrane.Buffer{} = buffer}}, state) do
     stream = get_in(state, [:pad_to_stream, pad])
     payload = maybe_packetize(buffer.payload, stream)
@@ -197,7 +209,7 @@ defmodule Membrane.MPEG.TS.Muxer do
       current_dts != nil and
         (state.last_pat_pmt_dts == nil or
            current_dts - state.last_pat_pmt_dts >= @pat_pmt_interval or
-           (stream.category == :video and Map.get(buffer.metadata, :is_keyframe?, false)))
+           (stream.category == :video and best_effort_is_keyframe?(buffer)))
 
     # Send PAT/PMT if needed
     {pat_pmt_actions, state} =
@@ -212,7 +224,7 @@ defmodule Membrane.MPEG.TS.Muxer do
       get_and_update_in(state, [:muxer], fn muxer ->
         case stream.category do
           :video ->
-            is_keyframe? = Map.get(buffer.metadata, :is_keyframe?, false)
+            is_keyframe? = best_effort_is_keyframe?(buffer)
             send_pcr? = Map.get(stream, :pcr?, false)
 
             TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts,
@@ -279,6 +291,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   defp handle_stream(pad, stream_type, ctx, state, format_descriptors) do
     profile_data = resolve_profile(ctx.pads[pad].options[:profile])
     stream_type = stream_type || profile_data[:stream_type]
+
     if stream_type == nil do
       {[], state}
     else

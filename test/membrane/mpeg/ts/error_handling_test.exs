@@ -221,7 +221,12 @@ defmodule Membrane.MPEG.TS.ErrorHandlingTest do
         |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
         get_child(:demuxer)
         |> via_out(:output, options: [pid: 0x100])
-        |> child(:parser, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+        |> child(:parser, %Membrane.H264.Parser{
+          output_stream_structure: :annexb,
+          repeat_parameter_sets: true,
+          output_alignment: :au,
+          skip_until_keyframe: false
+        })
         |> via_in(:input, options: [stream_type: :H264_AVC])
         |> get_child(:muxer),
         child(:muxer, Membrane.MPEG.TS.Muxer)
@@ -246,7 +251,12 @@ defmodule Membrane.MPEG.TS.ErrorHandlingTest do
         |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
         get_child(:demuxer)
         |> via_out(:output, options: [pid: 0x100])
-        |> child(:parser, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+        |> child(:parser, %Membrane.H264.Parser{
+          output_stream_structure: :annexb,
+          repeat_parameter_sets: true,
+          output_alignment: :au,
+          skip_until_keyframe: false
+        })
         |> via_in(:input, options: [stream_type: :H264_AVC, pid: 500])
         |> get_child(:muxer),
         child(:muxer, Membrane.MPEG.TS.Muxer)
@@ -282,7 +292,12 @@ defmodule Membrane.MPEG.TS.ErrorHandlingTest do
         |> get_child(:muxer),
         get_child(:demuxer)
         |> via_out(:output, options: [pid: 0x101])
-        |> child(:parser, %Membrane.NALU.ParserBin{alignment: :aud, assume_aligned: true})
+        |> child(:parser, %Membrane.H264.Parser{
+          output_stream_structure: :annexb,
+          repeat_parameter_sets: true,
+          output_alignment: :au,
+          skip_until_keyframe: false
+        })
         |> via_in(:input, options: [stream_type: :H264_AVC])
         |> get_child(:muxer),
         child(:muxer, Membrane.MPEG.TS.Muxer)

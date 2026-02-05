@@ -25,8 +25,9 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     assert_end_of_stream(pid, {:sink, :aac}, :input)
     :ok = Membrane.Pipeline.terminate(pid)
 
-    assert_sink_stream_format(pid, {:sink, :h264}, %Membrane.RemoteStream{
-      content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: :H264_AVC}
+    assert_sink_stream_format(pid, {:sink, :h264}, %Membrane.H264{
+      alignment: :au,
+      stream_structure: :annexb
     })
 
     assert_sink_stream_format(pid, {:sink, :aac}, %Membrane.RemoteStream{
@@ -112,8 +113,9 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     ]
 
     pid = Testing.Pipeline.start_link_supervised!(spec: spec)
-    assert_sink_stream_format(pid, :sink, %Membrane.RemoteStream{
-      content_format: %Membrane.MPEG.TS.StreamFormat{stream_type: :H264_AVC}
+    assert_sink_stream_format(pid, :sink, %Membrane.H264{
+      alignment: :au,
+      stream_structure: :annexb
     })
     assert_sink_buffer(pid, :sink, %Membrane.Buffer{})
     assert_end_of_stream(pid, :sink, :input)

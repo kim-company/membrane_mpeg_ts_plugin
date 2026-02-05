@@ -7,6 +7,10 @@ defmodule Membrane.MPEG.TS.Demuxer do
   and [Program Mapping
   Table](https://en.wikipedia.org/wiki/MPEG_transport_stream#PMT).
 
+  For `:H264_AVC` streams, the demuxer emits `%Membrane.H264{alignment: :au,
+  stream_structure: :annexb}` and assumes each PES contains exactly one access
+  unit.
+
   Use `profile:` to select streams that require descriptors and depacketization
   (e.g. Opus in MPEG-TS). For custom payloads, match `stream_type:` and
   `registration_descriptor:` explicitly.
@@ -24,7 +28,7 @@ defmodule Membrane.MPEG.TS.Demuxer do
 
   def_output_pad(:output,
     availability: :on_request,
-    accepted_format: %Membrane.RemoteStream{},
+    accepted_format: any_of(Membrane.RemoteStream, Membrane.H264),
     flow_control: :auto,
     options: [
       pid: [
@@ -293,12 +297,19 @@ defmodule Membrane.MPEG.TS.Demuxer do
             |> TS.Demuxer.available_streams()
             |> Map.fetch!(pid)
 
-          format = %Membrane.RemoteStream{
-            content_format: %Membrane.MPEG.TS.StreamFormat{
-              stream_type: stream.stream_type,
-              descriptors: stream.descriptors
-            }
-          }
+          format =
+            case stream.stream_type do
+              :H264_AVC ->
+                %Membrane.H264{alignment: :au, stream_structure: :annexb}
+
+              _other ->
+                %Membrane.RemoteStream{
+                  content_format: %Membrane.MPEG.TS.StreamFormat{
+                    stream_type: stream.stream_type,
+                    descriptors: stream.descriptors
+                  }
+                }
+            end
 
           {:stream_format, {pad, format}}
         end)
