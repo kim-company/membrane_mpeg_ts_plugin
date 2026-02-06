@@ -6,6 +6,18 @@ defmodule Membrane.MPEG.TS.StreamFormat do
   stream_type (e.g. PES private data with a registration descriptor).
   """
 
-  @type t :: %__MODULE__{stream_type: atom(), descriptors: list()}
-  defstruct stream_type: nil, descriptors: []
+  @type elementary_stream_t :: %{
+          optional(:pid) => non_neg_integer(),
+          optional(:stream_type) => atom(),
+          optional(:descriptors) => list(),
+          optional(:upstream_format) => struct() | nil
+        }
+
+  @type t :: %__MODULE__{
+          stream_type: atom() | nil,
+          descriptors: list(),
+          elementary_streams: [elementary_stream_t()]
+        }
+
+  defstruct stream_type: nil, descriptors: [], elementary_streams: []
 end

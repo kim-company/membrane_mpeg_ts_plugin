@@ -95,7 +95,8 @@ defmodule Membrane.MPEG.TS.Muxer do
       last_pat_pmt_dts: nil,
       # Track all valid PIDs that should appear in the stream
       # Initially includes system PIDs (PAT, CAT, PMT)
-      valid_pids: MapSet.new([@pat_pid, @cat_pid, @pmt_pid])
+      valid_pids: MapSet.new([@pat_pid, @cat_pid, @pmt_pid]),
+      stream_format_sent?: false
     }
 
     {[], state}
@@ -109,18 +110,27 @@ defmodule Membrane.MPEG.TS.Muxer do
             stream_type: stream_type,
             descriptors: descriptors
           }
-        },
+        } = format,
         ctx,
         state
       ) do
-    handle_stream(pad, stream_type, ctx, state, descriptors)
+    handle_stream(pad, stream_type, ctx, state, descriptors, format)
   end
 
-  def handle_stream_format(pad, %Membrane.H264{}, ctx, state) do
-    handle_stream(pad, :H264_AVC, ctx, state, [])
+  def handle_stream_format(pad, %Membrane.H264{} = format, ctx, state) do
+    handle_stream(pad, :H264_AVC, ctx, state, [], format)
   end
 
-  def handle_stream_format(pad, _format, _ctx, state) when is_map_key(state.pad_to_stream, pad) do
+  def handle_stream_format(pad, format, _ctx, state) when is_map_key(state.pad_to_stream, pad) do
+    state =
+      update_in(state, [:pad_to_stream, pad], fn stream ->
+        if Map.get(stream, :upstream_format) == nil do
+          Map.put(stream, :upstream_format, format)
+        else
+          stream
+        end
+      end)
+
     {[], state}
   end
 
@@ -133,8 +143,7 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   @impl true
   def handle_playing(_ctx, state) do
-    # Send only stream format; PAT/PMT will be sent with first media buffer
-    {[stream_format: {:output, %Membrane.RemoteStream{}}], state}
+    {[], state}
   end
 
   @impl true
@@ -148,7 +157,7 @@ defmodule Membrane.MPEG.TS.Muxer do
   @impl true
   def handle_pad_added(pad, ctx, state) do
     stream_type = ctx.pad_options[:stream_type]
-    handle_stream(pad, stream_type, ctx, state, [])
+    handle_stream(pad, stream_type, ctx, state, [], nil)
   end
 
   @impl true
@@ -174,7 +183,24 @@ defmodule Membrane.MPEG.TS.Muxer do
   defp handle_queue_output({suggested_actions, items, queue}, ctx, state) do
     state = %{state | queue: queue}
     {actions, state} = Enum.flat_map_reduce(items, state, &handle_queue_item/2)
-    {suggested_actions ++ actions ++ maybe_end_of_stream(ctx, state), state}
+
+    output_actions = suggested_actions ++ actions ++ maybe_end_of_stream(ctx, state)
+    {output_actions, state} = maybe_emit_stream_format(output_actions, items, state)
+
+    {output_actions, state}
+  end
+
+  defp maybe_emit_stream_format(actions, items, state)
+       when state.stream_format_sent? or items == [] do
+    {actions, state}
+  end
+
+  defp maybe_emit_stream_format(actions, _items, state) do
+    stream_format_action =
+      {:stream_format,
+       {:output, %Membrane.RemoteStream{content_format: build_output_stream_format(state)}}}
+
+    {[stream_format_action | actions], %{state | stream_format_sent?: true}}
   end
 
   # Match H264.Parser metadata
@@ -284,11 +310,25 @@ defmodule Membrane.MPEG.TS.Muxer do
   defp handle_queue_item(_, state), do: {[], state}
 
   # The stream has already been added.
-  defp handle_stream(pad, _stream_format, _ctx, state, _format_descriptors)
-       when is_map_key(state.pad_to_stream, pad),
-       do: {[], state}
+  defp handle_stream(pad, _stream_format, _ctx, state, _format_descriptors, upstream_format)
+       when is_map_key(state.pad_to_stream, pad) do
+    state =
+      if is_nil(upstream_format) do
+        state
+      else
+        update_in(state, [:pad_to_stream, pad], fn stream ->
+          if Map.get(stream, :upstream_format) == nil do
+            Map.put(stream, :upstream_format, upstream_format)
+          else
+            stream
+          end
+        end)
+      end
 
-  defp handle_stream(pad, stream_type, ctx, state, format_descriptors) do
+    {[], state}
+  end
+
+  defp handle_stream(pad, stream_type, ctx, state, format_descriptors, upstream_format) do
     profile_data = resolve_profile(ctx.pads[pad].options[:profile])
     stream_type = stream_type || profile_data[:stream_type]
 
@@ -340,7 +380,8 @@ defmodule Membrane.MPEG.TS.Muxer do
           wait_on_buffers?: wait_on_buffers?,
           pcr?: pcr?,
           packetizer: profile_data[:packetizer],
-          descriptors: descriptors
+          descriptors: descriptors,
+          upstream_format: upstream_format
         })
         |> update_in(
           [:queue],
@@ -357,6 +398,23 @@ defmodule Membrane.MPEG.TS.Muxer do
         {[], state}
       end
     end
+  end
+
+  defp build_output_stream_format(state) do
+    elementary_streams =
+      state.pad_to_stream
+      |> Map.values()
+      |> Enum.sort_by(& &1.pid)
+      |> Enum.map(fn stream ->
+        %{
+          pid: stream.pid,
+          stream_type: stream.type,
+          descriptors: stream.descriptors,
+          upstream_format: Map.get(stream, :upstream_format)
+        }
+      end)
+
+    %Membrane.MPEG.TS.StreamFormat{elementary_streams: elementary_streams}
   end
 
   defp maybe_end_of_stream(ctx, state) do

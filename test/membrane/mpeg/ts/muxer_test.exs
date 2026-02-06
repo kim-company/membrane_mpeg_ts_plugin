@@ -239,6 +239,38 @@ defmodule Membrane.MPEG.TS.MuxerTest do
     assert_no_errors(analysis)
   end
 
+  test "emits output stream format with elementary stream metadata" do
+    h264_format = %Membrane.H264{profile: :high, alignment: :au, stream_structure: :annexb}
+    aac_format = %Membrane.AAC{profile: :LC, sample_rate: 48_000, channels: 2}
+
+    spec = [
+      child(:video_source, %Testing.Source{
+        stream_format: h264_format,
+        output: [%Membrane.Buffer{payload: <<0, 0, 1, 101>>, pts: 0, dts: 0}]
+      })
+      |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+      |> get_child(:muxer),
+      child(:audio_source, %Testing.Source{
+        stream_format: aac_format,
+        output: [%Membrane.Buffer{payload: <<255, 241, 80, 128>>, pts: 0}]
+      })
+      |> via_in(:input, options: [stream_type: :AAC_ADTS])
+      |> get_child(:muxer),
+      child(:muxer, Membrane.MPEG.TS.Muxer)
+      |> child(:sink, %Testing.Sink{})
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_sink_stream_format(pid, :sink, %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{elementary_streams: elementary_streams}
+    })
+
+    assert length(elementary_streams) == 2
+
+    :ok = Testing.Pipeline.terminate(pid)
+  end
+
   @tag :tmp_dir
   test "muxes and demuxes JSON private data", %{tmp_dir: tmp_dir} do
     output_path = Path.join(tmp_dir, "json.ts")
