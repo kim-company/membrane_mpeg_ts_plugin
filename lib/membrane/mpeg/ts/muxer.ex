@@ -143,7 +143,11 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   @impl true
   def handle_playing(_ctx, state) do
-    {[], state}
+    output_stream_format = %Membrane.RemoteStream{
+      content_format: build_output_stream_format(state)
+    }
+
+    {[stream_format: {:output, output_stream_format}], %{state | stream_format_sent?: true}}
   end
 
   @impl true
