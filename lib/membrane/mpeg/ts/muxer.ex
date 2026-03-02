@@ -143,11 +143,11 @@ defmodule Membrane.MPEG.TS.Muxer do
 
   @impl true
   def handle_playing(_ctx, state) do
-    output_stream_format = %Membrane.RemoteStream{
-      content_format: build_output_stream_format(state)
-    }
-
-    {[stream_format: {:output, output_stream_format}], %{state | stream_format_sent?: true}}
+    # Stream format emission is deferred to the first buffer via
+    # maybe_emit_stream_format/3 so that upstream_format fields on
+    # elementary streams are populated (they arrive in handle_stream_format
+    # which may run after handle_playing).
+    {[], state}
   end
 
   @impl true
