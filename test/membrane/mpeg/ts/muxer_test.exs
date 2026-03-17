@@ -1005,4 +1005,262 @@ defmodule Membrane.MPEG.TS.MuxerTest do
     # Verify no transport errors (critical for timestamp rollover test)
     assert_no_errors(analysis)
   end
+
+  describe "timestamp sanitization for non-AV streams" do
+    @tag :tmp_dir
+    test "clamps out-of-order buffer when it has remaining duration", %{tmp_dir: tmp_dir} do
+      output_path = Path.join(tmp_dir, "clamp.ts")
+
+      # Buffer 1: pts=5s, to=6s
+      # Buffer 2: pts=4s, to=7s (out-of-order, but to > last_pts so it gets clamped)
+      # Buffer 3: pts=8s (in-order after clamp)
+      buffers = [
+        %Membrane.Buffer{
+          payload: ~s({"text":"first","from":5000,"to":6000}),
+          pts: Membrane.Time.seconds(5),
+          metadata: %{to: Membrane.Time.seconds(6)}
+        },
+        %Membrane.Buffer{
+          payload: ~s({"text":"clamped","from":4000,"to":7000}),
+          pts: Membrane.Time.seconds(4),
+          metadata: %{to: Membrane.Time.seconds(7)}
+        },
+        %Membrane.Buffer{
+          payload: ~s({"text":"third","from":8000,"to":9000}),
+          pts: Membrane.Time.seconds(8),
+          metadata: %{to: Membrane.Time.seconds(9)}
+        }
+      ]
+
+      spec = [
+        child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+        |> child(:demuxer, TS.Demuxer),
+        get_child(:demuxer)
+        |> via_out(:output, options: [pid: 0x100])
+        |> build_h264_parser()
+        |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+        |> get_child(:muxer),
+        child(:json_source, %Testing.Source{output: buffers})
+        |> via_in(:input,
+          options: [
+            stream_type: :PES_PRIVATE_DATA,
+            descriptors: [%{tag: 0x05, data: "JSON"}],
+            wait_on_buffers?: false
+          ]
+        )
+        |> get_child(:muxer),
+        child(:muxer, Membrane.MPEG.TS.Muxer)
+        |> child(:sink, %Membrane.File.Sink{location: output_path})
+      ]
+
+      pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+      assert_end_of_stream(pid, :sink)
+      :ok = Testing.Pipeline.terminate(pid)
+
+      # Demux and verify all 3 buffers came through (the out-of-order one was clamped, not dropped)
+      demux_spec = [
+        child(:source, %Membrane.File.Source{location: output_path})
+        |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+        get_child(:demuxer)
+        |> via_out(:output, options: [stream_type: :PES_PRIVATE_DATA])
+        |> child(:sink, %Testing.Sink{})
+      ]
+
+      demux_pid = Testing.Pipeline.start_link_supervised!(spec: demux_spec)
+
+      assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{
+        payload: ~s({"text":"first","from":5000,"to":6000})
+      })
+
+      assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{
+        payload: ~s({"text":"clamped","from":4000,"to":7000})
+      })
+
+      assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{
+        payload: ~s({"text":"third","from":8000,"to":9000})
+      })
+
+      assert_end_of_stream(demux_pid, :sink, :input)
+      :ok = Testing.Pipeline.terminate(demux_pid)
+    end
+
+    @tag :tmp_dir
+    test "drops out-of-order buffer when entirely in the past", %{tmp_dir: tmp_dir} do
+      output_path = Path.join(tmp_dir, "drop.ts")
+
+      # Buffer 1: pts=5s, to=6s — last_pts becomes 5s
+      # Buffer 2: pts=4s, to=5s — entirely in the past (to <= last_pts), dropped
+      # Buffer 3: pts=7s — in-order, passes through
+      buffers = [
+        %Membrane.Buffer{
+          payload: ~s({"text":"first","from":5000,"to":6000}),
+          pts: Membrane.Time.seconds(5),
+          metadata: %{to: Membrane.Time.seconds(6)}
+        },
+        %Membrane.Buffer{
+          payload: ~s({"text":"dropped","from":4000,"to":5000}),
+          pts: Membrane.Time.seconds(4),
+          metadata: %{to: Membrane.Time.seconds(5)}
+        },
+        %Membrane.Buffer{
+          payload: ~s({"text":"third","from":7000,"to":8000}),
+          pts: Membrane.Time.seconds(7),
+          metadata: %{to: Membrane.Time.seconds(8)}
+        }
+      ]
+
+      spec = [
+        child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+        |> child(:demuxer, TS.Demuxer),
+        get_child(:demuxer)
+        |> via_out(:output, options: [pid: 0x100])
+        |> build_h264_parser()
+        |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+        |> get_child(:muxer),
+        child(:json_source, %Testing.Source{output: buffers})
+        |> via_in(:input,
+          options: [
+            stream_type: :PES_PRIVATE_DATA,
+            descriptors: [%{tag: 0x05, data: "JSON"}],
+            wait_on_buffers?: false
+          ]
+        )
+        |> get_child(:muxer),
+        child(:muxer, Membrane.MPEG.TS.Muxer)
+        |> child(:sink, %Membrane.File.Sink{location: output_path})
+      ]
+
+      pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+      assert_end_of_stream(pid, :sink)
+      :ok = Testing.Pipeline.terminate(pid)
+
+      # Demux and verify only 2 buffers came through (the stale one was dropped)
+      demux_spec = [
+        child(:source, %Membrane.File.Source{location: output_path})
+        |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+        get_child(:demuxer)
+        |> via_out(:output, options: [stream_type: :PES_PRIVATE_DATA])
+        |> child(:sink, %Testing.Sink{})
+      ]
+
+      demux_pid = Testing.Pipeline.start_link_supervised!(spec: demux_spec)
+
+      assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{
+        payload: ~s({"text":"first","from":5000,"to":6000})
+      })
+
+      assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{
+        payload: ~s({"text":"third","from":7000,"to":8000})
+      })
+
+      assert_end_of_stream(demux_pid, :sink, :input)
+      :ok = Testing.Pipeline.terminate(demux_pid)
+    end
+
+    @tag :tmp_dir
+    test "drops out-of-order buffer when no duration info available", %{tmp_dir: tmp_dir} do
+      output_path = Path.join(tmp_dir, "drop_no_to.ts")
+
+      # Buffer 1: pts=5s, no metadata.to
+      # Buffer 2: pts=4s, no metadata.to — out-of-order, no duration info, dropped
+      # Buffer 3: pts=7s — in-order, passes through
+      buffers = [
+        %Membrane.Buffer{
+          payload: ~s({"text":"first"}),
+          pts: Membrane.Time.seconds(5),
+          metadata: %{}
+        },
+        %Membrane.Buffer{
+          payload: ~s({"text":"dropped"}),
+          pts: Membrane.Time.seconds(4),
+          metadata: %{}
+        },
+        %Membrane.Buffer{
+          payload: ~s({"text":"third"}),
+          pts: Membrane.Time.seconds(7),
+          metadata: %{}
+        }
+      ]
+
+      spec = [
+        child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+        |> child(:demuxer, TS.Demuxer),
+        get_child(:demuxer)
+        |> via_out(:output, options: [pid: 0x100])
+        |> build_h264_parser()
+        |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+        |> get_child(:muxer),
+        child(:json_source, %Testing.Source{output: buffers})
+        |> via_in(:input,
+          options: [
+            stream_type: :PES_PRIVATE_DATA,
+            descriptors: [%{tag: 0x05, data: "JSON"}],
+            wait_on_buffers?: false
+          ]
+        )
+        |> get_child(:muxer),
+        child(:muxer, Membrane.MPEG.TS.Muxer)
+        |> child(:sink, %Membrane.File.Sink{location: output_path})
+      ]
+
+      pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+      assert_end_of_stream(pid, :sink)
+      :ok = Testing.Pipeline.terminate(pid)
+
+      # Demux and verify only 2 buffers came through
+      demux_spec = [
+        child(:source, %Membrane.File.Source{location: output_path})
+        |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+        get_child(:demuxer)
+        |> via_out(:output, options: [stream_type: :PES_PRIVATE_DATA])
+        |> child(:sink, %Testing.Sink{})
+      ]
+
+      demux_pid = Testing.Pipeline.start_link_supervised!(spec: demux_spec)
+
+      assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{
+        payload: ~s({"text":"first"})
+      })
+
+      assert_sink_buffer(demux_pid, :sink, %Membrane.Buffer{
+        payload: ~s({"text":"third"})
+      })
+
+      assert_end_of_stream(demux_pid, :sink, :input)
+      :ok = Testing.Pipeline.terminate(demux_pid)
+    end
+
+    @tag :tmp_dir
+    test "does not sanitize audio/video pads", %{tmp_dir: tmp_dir} do
+      # This test verifies that in-order AV buffers still work fine,
+      # and the sanitization path is not applied to them.
+      output_path = Path.join(tmp_dir, "av_passthrough.ts")
+
+      spec = [
+        child(:source, %Membrane.File.Source{location: "test/data/avsync.ts"})
+        |> child(:demuxer, TS.Demuxer),
+        get_child(:demuxer)
+        |> via_out(:output, options: [pid: 0x100])
+        |> build_h264_parser()
+        |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+        |> get_child(:muxer),
+        get_child(:demuxer)
+        |> via_out(:output, options: [pid: 0x101])
+        |> child({:aac, :parser}, %Membrane.AAC.Parser{})
+        |> via_in(:input, options: [stream_type: :AAC_ADTS])
+        |> get_child(:muxer),
+        child(:muxer, Membrane.MPEG.TS.Muxer)
+        |> child(:sink, %Membrane.File.Sink{location: output_path})
+      ]
+
+      pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+      assert_end_of_stream(pid, :sink)
+      :ok = Testing.Pipeline.terminate(pid)
+
+      analysis = run_tsanalyze(output_path)
+      expected_pids = %{0x100 => "AVC", 0x101 => "AAC"}
+      assert_only_expected_pids(analysis, expected_pids)
+      assert_no_errors(analysis)
+    end
+  end
 end
