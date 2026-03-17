@@ -180,35 +180,35 @@ defmodule Membrane.MPEG.TS.Demuxer do
     {actions ++ format_actions, state}
   end
 
-  defp handle_demuxed(unit = %Container{pid: pid}, _ctx, state) do
-    pads = get_in(state, [:pid_to_pads, Access.key(pid, [])])
-    stream = state.demuxer |> TS.Demuxer.available_streams() |> Map.get(pid)
-    buffer = ts_unit_to_buffer(unit, stream)
+  defp handle_demuxed(%Container{pid: pid} = unit, _ctx, state) do
+    if drop_until_video?(
+         state,
+         pid,
+         state.demuxer |> TS.Demuxer.available_streams() |> Map.get(pid)
+       ) do
+      {[], state}
+    else
+      stream = state.demuxer |> TS.Demuxer.available_streams() |> Map.get(pid)
+      pads = get_in(state, [:pid_to_pads, Access.key(pid, [])])
+      buffer = ts_unit_to_buffer(unit, stream)
+
+      state =
+        if video_stream?(state, pid, stream), do: %{state | video_started?: true}, else: state
+
+      actions = build_buffer_actions(pads, buffer)
+      {actions, state}
+    end
+  end
+
+  defp build_buffer_actions(pads, buffer) do
     discontinue? = get_in(buffer, [Access.key!(:metadata), Access.key(:discontinuity, false)])
 
-    {actions, state} =
-      if drop_until_video?(state, pid, stream) do
-        {[], state}
-      else
-        state =
-          if video_stream?(state, pid, stream) do
-            %{state | video_started?: true}
-          else
-            state
-          end
+    Enum.flat_map(pads, fn pad ->
+      extras =
+        if discontinue?, do: [{:event, {pad, %Membrane.Event.Discontinuity{}}}], else: []
 
-        actions =
-          Enum.flat_map(pads, fn pad ->
-            extras =
-              if discontinue?, do: [{:event, {pad, %Membrane.Event.Discontinuity{}}}], else: []
-
-            extras ++ [{:buffer, {pad, buffer}}]
-          end)
-
-        {actions, state}
-      end
-
-    {actions, state}
+      extras ++ [{:buffer, {pad, buffer}}]
+    end)
   end
 
   defp refresh_pid_to_pad(state) do
@@ -217,56 +217,43 @@ defmodule Membrane.MPEG.TS.Demuxer do
     state.subscribers
     |> Enum.filter(fn {_pad, %{bound: x}} -> not x end)
     |> Enum.reduce(state, fn {pad, %{opts: opts}}, state ->
-      # Now we shall check if there is a stream in the PMT table that
-      # can satisfy the stream connected stream.
-      cond do
-        opts[:pid] != nil ->
-          # The user specified the PID directly.
-          if Map.has_key?(avail, opts[:pid]), do: bind(pad, opts[:pid], state), else: state
-
-        opts[:profile] != nil ->
-          pid =
-            Enum.find_value(avail, fn {pid, x} ->
-              if profile_match?(x, opts[:profile]), do: pid
-            end)
-
-          if pid, do: bind(pad, pid, state), else: state
-
-        opts[:stream_type] != nil ->
-          pid =
-            Enum.find_value(avail, fn {pid, x} ->
-              if x.stream_type == opts[:stream_type] and
-                   registration_descriptor_match?(x, opts[:registration_descriptor]) do
-                pid
-              end
-            end)
-
-          if pid, do: bind(pad, pid, state), else: state
-
-        opts[:stream_category] != nil ->
-          pid =
-            Enum.find_value(avail, fn {pid, x} ->
-              if stream_category_for(x) == opts[:stream_category] and
-                   registration_descriptor_match?(x, opts[:registration_descriptor]) do
-                pid
-              end
-            end)
-
-          if pid, do: bind(pad, pid, state), else: state
-
-        opts[:registration_descriptor] != nil ->
-          pid =
-            Enum.find_value(avail, fn {pid, x} ->
-              if registration_descriptor_match?(x, opts[:registration_descriptor]), do: pid
-            end)
-
-          if pid, do: bind(pad, pid, state), else: state
-
-        true ->
-          state
+      case find_matching_pid(avail, opts) do
+        nil -> state
+        pid -> bind(pad, pid, state)
       end
     end)
   end
+
+  defp find_matching_pid(avail, %{pid: pid}) when pid != nil do
+    if Map.has_key?(avail, pid), do: pid
+  end
+
+  defp find_matching_pid(avail, %{profile: profile}) when profile != nil do
+    Enum.find_value(avail, fn {pid, x} ->
+      if profile_match?(x, profile), do: pid
+    end)
+  end
+
+  defp find_matching_pid(avail, %{stream_type: st, registration_descriptor: rd}) when st != nil do
+    Enum.find_value(avail, fn {pid, x} ->
+      if x.stream_type == st and registration_descriptor_match?(x, rd), do: pid
+    end)
+  end
+
+  defp find_matching_pid(avail, %{stream_category: sc, registration_descriptor: rd})
+       when sc != nil do
+    Enum.find_value(avail, fn {pid, x} ->
+      if stream_category_for(x) == sc and registration_descriptor_match?(x, rd), do: pid
+    end)
+  end
+
+  defp find_matching_pid(avail, %{registration_descriptor: rd}) when rd != nil do
+    Enum.find_value(avail, fn {pid, x} ->
+      if registration_descriptor_match?(x, rd), do: pid
+    end)
+  end
+
+  defp find_matching_pid(_avail, _opts), do: nil
 
   defp bind(pad, pid, state) do
     avail = TS.Demuxer.available_streams(state.demuxer)
@@ -297,25 +284,24 @@ defmodule Membrane.MPEG.TS.Demuxer do
             |> TS.Demuxer.available_streams()
             |> Map.fetch!(pid)
 
-          format =
-            case stream.stream_type do
-              :H264_AVC ->
-                %Membrane.H264{alignment: :au, stream_structure: :annexb}
-
-              _other ->
-                %Membrane.RemoteStream{
-                  content_format: %Membrane.MPEG.TS.StreamFormat{
-                    stream_type: stream.stream_type,
-                    descriptors: stream.descriptors
-                  }
-                }
-            end
-
-          {:stream_format, {pad, format}}
+          {:stream_format, {pad, stream_format_for(stream)}}
         end)
       end)
 
     {actions, state}
+  end
+
+  defp stream_format_for(%{stream_type: :H264_AVC}) do
+    %Membrane.H264{alignment: :au, stream_structure: :annexb}
+  end
+
+  defp stream_format_for(stream) do
+    %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{
+        stream_type: stream.stream_type,
+        descriptors: stream.descriptors
+      }
+    }
   end
 
   defp ts_unit_to_buffer(%Container{payload: x = %TS.PES{}}, stream) do

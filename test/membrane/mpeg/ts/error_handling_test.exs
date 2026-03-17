@@ -274,7 +274,7 @@ defmodule Membrane.MPEG.TS.ErrorHandlingTest do
         |> Stream.filter(fn %{pid: pid} -> pid == 500 end)
         |> Enum.take(5)
 
-      assert length(containers) > 0, "Should have packets on custom PID 500"
+      assert containers != [], "Should have packets on custom PID 500"
     end
 
     @tag :tmp_dir

@@ -48,7 +48,8 @@ defmodule Membrane.MPEG.TS.MixProject do
       {:membrane_file_plugin, ">= 0.0.0", only: :test},
       {:membrane_aac_plugin, "~> 0.19.1", only: :test},
       {:membrane_h26x_plugin, "~> 0.10", only: :test},
-      {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
+      {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 

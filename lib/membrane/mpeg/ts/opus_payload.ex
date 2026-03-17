@@ -86,9 +86,8 @@ defmodule Membrane.MPEG.TS.OpusPayload do
   end
 
   defp parse_trim(flags, rest) do
-    with {:ok, rest} <- maybe_drop_trim(rest, flags, 0x10),
-         {:ok, rest} <- maybe_drop_trim(rest, flags, 0x08) do
-      {:ok, rest}
+    with {:ok, rest} <- maybe_drop_trim(rest, flags, 0x10) do
+      maybe_drop_trim(rest, flags, 0x08)
     end
   end
 

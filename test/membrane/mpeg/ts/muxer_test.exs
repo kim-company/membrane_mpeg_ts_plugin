@@ -76,7 +76,7 @@ defmodule Membrane.MPEG.TS.MuxerTest do
   # Validate PCR is present and valid
   defp assert_pcr_valid(analysis, expected_pcr_pid) do
     services = analysis["services"] || []
-    assert length(services) > 0, "No services found in stream"
+    assert services != [], "No services found in stream"
 
     service = List.first(services)
     pcr_pid = service["pcr-pid"]
@@ -128,8 +128,8 @@ defmodule Membrane.MPEG.TS.MuxerTest do
            Expected PIDs: #{inspect(expected_pid_ids)}
            Actual PIDs:   #{inspect(actual_pid_ids)}
 
-           Expected (hex): #{Enum.map(expected_pid_ids, &"0x#{Integer.to_string(&1, 16)}") |> Enum.join(", ")}
-           Actual (hex):   #{Enum.map(actual_pid_ids, &"0x#{Integer.to_string(&1, 16)}") |> Enum.join(", ")}
+           Expected (hex): #{Enum.map_join(expected_pid_ids, ", ", &"0x#{Integer.to_string(&1, 16)}")}
+           Actual (hex):   #{Enum.map_join(actual_pid_ids, ", ", &"0x#{Integer.to_string(&1, 16)}")}
            """
   end
 
@@ -528,7 +528,7 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       |> MPEG.TS.Demuxer.stream_file!()
       |> Enum.into([])
 
-    assert length(units) > 0
+    assert units != []
 
     assert Enum.filter(units, fn %{pid: x} -> x == 500 end) == [
              %MPEG.TS.Demuxer.Container{
@@ -829,7 +829,7 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       |> Enum.to_list()
 
     # Verify we have PAT packets
-    assert length(pat_packets) > 0, "No PAT packets with timestamps found in output"
+    assert pat_packets != [], "No PAT packets with timestamps found in output"
 
     # Check intervals between consecutive PAT packets
     pat_intervals =
@@ -846,9 +846,9 @@ defmodule Membrane.MPEG.TS.MuxerTest do
     assert oversized_intervals == [],
            """
            Found PAT intervals exceeding 500ms spec requirement:
-           #{Enum.map(oversized_intervals, fn i -> "#{div(i, 1_000_000)}ms" end) |> Enum.join(", ")}
+           #{Enum.map_join(oversized_intervals, ", ", fn i -> "#{div(i, 1_000_000)}ms" end)}
 
-           All intervals: #{Enum.map(pat_intervals, fn i -> "#{div(i, 1_000_000)}ms" end) |> Enum.join(", ")}
+           All intervals: #{Enum.map_join(pat_intervals, ", ", fn i -> "#{div(i, 1_000_000)}ms" end)}
            """
 
     # Also verify basic structure with tsanalyze
@@ -894,8 +894,8 @@ defmodule Membrane.MPEG.TS.MuxerTest do
 
     # For audio-only streams without PCR, the demuxer cannot assign timestamps to PSI packets
     # We verify that PAT/PMT packets exist and are frequent enough based on packet count
-    assert length(all_pat_packets) > 0, "No PAT packets found in audio-only stream"
-    assert length(all_pmt_packets) > 0, "No PMT packets found in audio-only stream"
+    assert all_pat_packets != [], "No PAT packets found in audio-only stream"
+    assert all_pmt_packets != [], "No PMT packets found in audio-only stream"
 
     # Get audio stream duration to calculate expected PAT/PMT count
     audio_packets =
@@ -967,7 +967,7 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       |> Stream.filter(fn %{pid: pid} -> pid == 0x100 end)
       |> Enum.to_list()
 
-    assert length(output_containers) > 0
+    assert output_containers != []
     assert length(original_containers) == length(output_containers)
 
     # Verify that original and output timestamps match exactly

@@ -15,15 +15,8 @@ defmodule Membrane.MPEG.TS.Muxer.CorruptionError do
     valid_pids = Keyword.fetch!(opts, :valid_pids)
     packet_count = Keyword.fetch!(opts, :packet_count)
 
-    invalid_pids_hex =
-      invalid_pids
-      |> Enum.map(&"0x#{Integer.to_string(&1, 16)}")
-      |> Enum.join(", ")
-
-    valid_pids_hex =
-      valid_pids
-      |> Enum.map(&"0x#{Integer.to_string(&1, 16)}")
-      |> Enum.join(", ")
+    invalid_pids_hex = Enum.map_join(invalid_pids, ", ", &"0x#{Integer.to_string(&1, 16)}")
+    valid_pids_hex = Enum.map_join(valid_pids, ", ", &"0x#{Integer.to_string(&1, 16)}")
 
     message = """
     MPEG-TS Muxer Corruption Detected!

@@ -222,41 +222,43 @@ defmodule Membrane.MPEG.TS.Muxer do
     else
       last_pts = stream.last_pts
 
-      cond do
+      if last_pts == nil or buffer.pts == nil or buffer.pts >= last_pts do
         # First buffer on this pad or in-order: pass through
-        last_pts == nil or buffer.pts == nil or buffer.pts >= last_pts ->
-          state = maybe_update_last_pts(state, pad, buffer.pts)
-          {:ok, buffer, state}
-
+        state = maybe_update_last_pts(state, pad, buffer.pts)
+        {:ok, buffer, state}
+      else
         # Out-of-order: check if buffer has remaining duration via metadata.to
-        true ->
-          buffer_to = get_in(buffer.metadata, [:to])
-          delta_ms = div(last_pts - buffer.pts, 1_000_000)
-
-          if is_integer(buffer_to) and buffer_to > last_pts do
-            # Buffer partially in the past — clamp pts to last_pts
-            Membrane.Logger.warning(
-              "Clamped out-of-order buffer on PID #{stream.pid} (#{inspect(stream.type)}): " <>
-                "pts #{buffer.pts} < last_pts #{last_pts}, delta #{delta_ms}ms"
-            )
-
-            clamped = %Membrane.Buffer{buffer | pts: last_pts}
-            {:ok, clamped, state}
-          else
-            # Buffer entirely in the past (to <= last_pts) or no duration info — drop
-            reason =
-              if is_integer(buffer_to),
-                do: "to #{buffer_to} <= last_pts #{last_pts}",
-                else: "no duration info"
-
-            Membrane.Logger.warning(
-              "Dropped out-of-order buffer on PID #{stream.pid} (#{inspect(stream.type)}): " <>
-                "pts #{buffer.pts} < last_pts #{last_pts}, delta #{delta_ms}ms (#{reason})"
-            )
-
-            {:drop, state}
-          end
+        handle_out_of_order_buffer(buffer, stream, last_pts, pad, state)
       end
+    end
+  end
+
+  defp handle_out_of_order_buffer(%Membrane.Buffer{} = buffer, stream, last_pts, _pad, state) do
+    buffer_to = get_in(buffer.metadata, [:to])
+    delta_ms = div(last_pts - buffer.pts, 1_000_000)
+
+    if is_integer(buffer_to) and buffer_to > last_pts do
+      # Buffer partially in the past — clamp pts to last_pts
+      Membrane.Logger.warning(
+        "Clamped out-of-order buffer on PID #{stream.pid} (#{inspect(stream.type)}): " <>
+          "pts #{buffer.pts} < last_pts #{last_pts}, delta #{delta_ms}ms"
+      )
+
+      clamped = %Membrane.Buffer{buffer | pts: last_pts}
+      {:ok, clamped, state}
+    else
+      # Buffer entirely in the past (to <= last_pts) or no duration info — drop
+      reason =
+        if is_integer(buffer_to),
+          do: "to #{buffer_to} <= last_pts #{last_pts}",
+          else: "no duration info"
+
+      Membrane.Logger.warning(
+        "Dropped out-of-order buffer on PID #{stream.pid} (#{inspect(stream.type)}): " <>
+          "pts #{buffer.pts} < last_pts #{last_pts}, delta #{delta_ms}ms (#{reason})"
+      )
+
+      {:drop, state}
     end
   end
 
@@ -302,75 +304,16 @@ defmodule Membrane.MPEG.TS.Muxer do
     payload = maybe_packetize(buffer.payload, stream)
     buffer = %Membrane.Buffer{buffer | payload: payload}
 
-    # Extract DTS from buffer (use buffer.dts for video, buffer.pts for audio)
-    current_dts =
-      case stream.category do
-        :video -> buffer.dts || buffer.pts
-        :audio -> buffer.pts
-        _ -> buffer.dts || buffer.pts
-      end
-
-    # Update last_dts if we have a valid one
+    current_dts = extract_dts(stream, buffer)
     state = if current_dts != nil, do: %{state | last_dts: current_dts}, else: state
 
-    # Determine if we should send PAT/PMT based on:
-    # 1. Never sent before (last_pat_pmt_dts == nil)
-    # 2. 500ms elapsed since last send (per ISO/IEC 13818-1 spec)
-    # 3. Video keyframe (good practice for stream switching)
-    should_send_pat_pmt? =
-      current_dts != nil and
-        (state.last_pat_pmt_dts == nil or
-           current_dts - state.last_pat_pmt_dts >= @pat_pmt_interval or
-           (stream.category == :video and best_effort_is_keyframe?(buffer)))
-
-    # Send PAT/PMT if needed
-    {pat_pmt_actions, state} =
-      if should_send_pat_pmt? do
-        {actions, state} = mux_pat_pmt(state, current_dts)
-        {actions, %{state | last_pat_pmt_dts: current_dts}}
-      else
-        {[], state}
-      end
+    {pat_pmt_actions, state} = maybe_send_pat_pmt(stream, buffer, current_dts, state)
 
     {packet_or_packets, state} =
       get_and_update_in(state, [:muxer], fn muxer ->
-        case stream.category do
-          :video ->
-            is_keyframe? = best_effort_is_keyframe?(buffer)
-            send_pcr? = Map.get(stream, :pcr?, false)
-
-            TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts,
-              dts: buffer.dts,
-              sync?: is_keyframe?,
-              send_pcr?: send_pcr?
-            )
-
-          :audio ->
-            TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts, sync?: true)
-
-          _ ->
-            stream_info = %{stream_type: stream.type, descriptors: stream.descriptors}
-
-            if TS.PMT.pes_stream?(stream_info) do
-              TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts, sync?: true)
-            else
-              psi = get_in(buffer, [Access.key!(:metadata), :psi])
-
-              if psi != nil do
-                TS.Muxer.mux_psi(muxer, stream.pid, psi)
-              else
-                Membrane.Logger.warning(
-                  "Could not mux non-PES stream #{inspect(stream.type)} on PID #{stream.pid}: " <>
-                    "expected buffer.metadata.psi"
-                )
-
-                {[], muxer}
-              end
-            end
-        end
+        mux_stream(muxer, stream, buffer)
       end)
 
-    # Validate all muxed packets before converting to buffers
     packets = List.wrap(packet_or_packets)
 
     validate_packets!(
@@ -379,21 +322,85 @@ defmodule Membrane.MPEG.TS.Muxer do
       "#{stream.category} stream (PID #{stream.pid})"
     )
 
-    buffers =
-      packets
-      |> Enum.map(fn x ->
-        %Membrane.Buffer{
-          payload: marshal_payload(x),
-          pts: buffer.pts,
-          dts: buffer.dts,
-          metadata: extract_metadata(x)
-        }
-      end)
-
+    buffers = packets_to_buffers(packets, buffer)
     {pat_pmt_actions ++ [buffer: {:output, buffers}], state}
   end
 
   defp handle_queue_item(_, state), do: {[], state}
+
+  defp extract_dts(stream, buffer) do
+    case stream.category do
+      :video -> buffer.dts || buffer.pts
+      :audio -> buffer.pts
+      _ -> buffer.dts || buffer.pts
+    end
+  end
+
+  defp maybe_send_pat_pmt(stream, buffer, current_dts, state) do
+    should_send? =
+      current_dts != nil and
+        (state.last_pat_pmt_dts == nil or
+           current_dts - state.last_pat_pmt_dts >= @pat_pmt_interval or
+           (stream.category == :video and best_effort_is_keyframe?(buffer)))
+
+    if should_send? do
+      {actions, state} = mux_pat_pmt(state, current_dts)
+      {actions, %{state | last_pat_pmt_dts: current_dts}}
+    else
+      {[], state}
+    end
+  end
+
+  defp packets_to_buffers(packets, buffer) do
+    Enum.map(packets, fn x ->
+      %Membrane.Buffer{
+        payload: marshal_payload(x),
+        pts: buffer.pts,
+        dts: buffer.dts,
+        metadata: extract_metadata(x)
+      }
+    end)
+  end
+
+  defp mux_stream(muxer, %{category: :video} = stream, buffer) do
+    is_keyframe? = best_effort_is_keyframe?(buffer)
+    send_pcr? = Map.get(stream, :pcr?, false)
+
+    TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts,
+      dts: buffer.dts,
+      sync?: is_keyframe?,
+      send_pcr?: send_pcr?
+    )
+  end
+
+  defp mux_stream(muxer, %{category: :audio} = stream, buffer) do
+    TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts, sync?: true)
+  end
+
+  defp mux_stream(muxer, stream, buffer) do
+    stream_info = %{stream_type: stream.type, descriptors: stream.descriptors}
+
+    if TS.PMT.pes_stream?(stream_info) do
+      TS.Muxer.mux_sample(muxer, stream.pid, buffer.payload, buffer.pts, sync?: true)
+    else
+      mux_psi_stream(muxer, stream, buffer)
+    end
+  end
+
+  defp mux_psi_stream(muxer, stream, buffer) do
+    psi = get_in(buffer, [Access.key!(:metadata), :psi])
+
+    if psi != nil do
+      TS.Muxer.mux_psi(muxer, stream.pid, psi)
+    else
+      Membrane.Logger.warning(
+        "Could not mux non-PES stream #{inspect(stream.type)} on PID #{stream.pid}: " <>
+          "expected buffer.metadata.psi"
+      )
+
+      {[], muxer}
+    end
+  end
 
   # The stream has already been added.
   defp handle_stream(pad, _stream_format, _ctx, state, _format_descriptors, upstream_format)
@@ -402,13 +409,7 @@ defmodule Membrane.MPEG.TS.Muxer do
       if is_nil(upstream_format) do
         state
       else
-        update_in(state, [:pad_to_stream, pad], fn stream ->
-          if Map.get(stream, :upstream_format) == nil do
-            Map.put(stream, :upstream_format, upstream_format)
-          else
-            stream
-          end
-        end)
+        maybe_set_upstream_format(state, pad, upstream_format)
       end
 
     {[], state}
@@ -421,70 +422,104 @@ defmodule Membrane.MPEG.TS.Muxer do
     if stream_type == nil do
       {[], state}
     else
-      descriptors =
-        merge_descriptors(
-          profile_data[:descriptors],
-          merge_descriptors(format_descriptors, ctx.pads[pad].options[:descriptors])
-        )
+      add_elementary_stream(
+        pad,
+        stream_type,
+        ctx,
+        state,
+        format_descriptors,
+        upstream_format,
+        profile_data
+      )
+    end
+  end
 
-      stream_category = profile_data[:stream_category] || TS.PMT.get_stream_category(stream_type)
-      wait_on_buffers? = ctx.pads[pad].options[:wait_on_buffers?]
-      pcr? = ctx.pads[pad].options[:pcr?]
-
-      {pid, state} =
-        get_and_update_in(state, [:muxer], fn muxer ->
-          program_info =
-            case stream_type do
-              :SCTE_35_SPLICE -> [%{tag: 5, data: "CUEI"}]
-              _ -> []
-            end
-
-          pid = ctx.pads[pad].options[:pid]
-
-          stream_opts =
-            List.flatten([
-              [program_info: program_info],
-              if(pid != nil, do: [pid: pid], else: []),
-              if(pcr?, do: [pcr?: true], else: []),
-              if(descriptors != [], do: [descriptors: descriptors], else: [])
-            ])
-
-          TS.Muxer.add_elementary_stream(muxer, stream_type, stream_opts)
-        end)
-
-      Membrane.Logger.info(
-        "Binding #{inspect(pad)} to PID #{pid} (0x#{Integer.to_string(pid, 16)}) " <>
-          "for #{inspect(stream_type)}#{if pcr?, do: ", PCR", else: ""}"
+  defp add_elementary_stream(
+         pad,
+         stream_type,
+         ctx,
+         state,
+         format_descriptors,
+         upstream_format,
+         profile_data
+       ) do
+    descriptors =
+      merge_descriptors(
+        profile_data[:descriptors],
+        merge_descriptors(format_descriptors, ctx.pads[pad].options[:descriptors])
       )
 
-      state =
-        state
-        |> put_in([:pad_to_stream, pad], %{
-          pid: pid,
-          type: stream_type,
-          category: stream_category,
-          wait_on_buffers?: wait_on_buffers?,
-          pcr?: pcr?,
-          packetizer: profile_data[:packetizer],
-          descriptors: descriptors,
-          upstream_format: upstream_format,
-          last_pts: nil
-        })
-        |> update_in(
-          [:queue],
-          &TimestampQueue.register_pad(&1, pad, wait_on_buffers?: wait_on_buffers?)
-        )
-        |> update_in([:valid_pids], &MapSet.put(&1, pid))
+    stream_category = profile_data[:stream_category] || TS.PMT.get_stream_category(stream_type)
+    wait_on_buffers? = ctx.pads[pad].options[:wait_on_buffers?]
+    pcr? = ctx.pads[pad].options[:pcr?]
 
-      if ctx.playback == :playing and state.last_pat_pmt_dts != nil and state.last_dts != nil do
-        # Each time a pad is added at runtime, update the PMT with current timing
-        {actions, state} = mux_pat_pmt(state, state.last_dts)
-        {actions, %{state | last_pat_pmt_dts: state.last_dts}}
-      else
-        # PAT/PMT will be sent with first media buffer
-        {[], state}
+    {pid, state} =
+      get_and_update_in(state, [:muxer], fn muxer ->
+        stream_opts =
+          build_stream_opts(stream_type, ctx.pads[pad].options[:pid], pcr?, descriptors)
+
+        TS.Muxer.add_elementary_stream(muxer, stream_type, stream_opts)
+      end)
+
+    Membrane.Logger.info(
+      "Binding #{inspect(pad)} to PID #{pid} (0x#{Integer.to_string(pid, 16)}) " <>
+        "for #{inspect(stream_type)}#{if pcr?, do: ", PCR", else: ""}"
+    )
+
+    state =
+      state
+      |> put_in([:pad_to_stream, pad], %{
+        pid: pid,
+        type: stream_type,
+        category: stream_category,
+        wait_on_buffers?: wait_on_buffers?,
+        pcr?: pcr?,
+        packetizer: profile_data[:packetizer],
+        descriptors: descriptors,
+        upstream_format: upstream_format,
+        last_pts: nil
+      })
+      |> update_in(
+        [:queue],
+        &TimestampQueue.register_pad(&1, pad, wait_on_buffers?: wait_on_buffers?)
+      )
+      |> update_in([:valid_pids], &MapSet.put(&1, pid))
+
+    maybe_emit_runtime_pat_pmt(ctx, state)
+  end
+
+  defp build_stream_opts(stream_type, pid, pcr?, descriptors) do
+    program_info =
+      case stream_type do
+        :SCTE_35_SPLICE -> [%{tag: 5, data: "CUEI"}]
+        _ -> []
       end
+
+    List.flatten([
+      [program_info: program_info],
+      if(pid != nil, do: [pid: pid], else: []),
+      if(pcr?, do: [pcr?: true], else: []),
+      if(descriptors != [], do: [descriptors: descriptors], else: [])
+    ])
+  end
+
+  defp maybe_emit_runtime_pat_pmt(ctx, state) do
+    if ctx.playback == :playing and state.last_pat_pmt_dts != nil and state.last_dts != nil do
+      {actions, state} = mux_pat_pmt(state, state.last_dts)
+      {actions, %{state | last_pat_pmt_dts: state.last_dts}}
+    else
+      {[], state}
     end
+  end
+
+  defp maybe_set_upstream_format(state, pad, upstream_format) do
+    update_in(state, [:pad_to_stream, pad], fn stream ->
+      if Map.get(stream, :upstream_format) == nil do
+        Map.put(stream, :upstream_format, upstream_format)
+      else
+        stream
+      end
+    end)
   end
 
   defp build_output_stream_format(state) do

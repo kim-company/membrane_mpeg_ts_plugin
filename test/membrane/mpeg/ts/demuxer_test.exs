@@ -113,10 +113,12 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     ]
 
     pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+
     assert_sink_stream_format(pid, :sink, %Membrane.H264{
       alignment: :au,
       stream_structure: :annexb
     })
+
     assert_sink_buffer(pid, :sink, %Membrane.Buffer{})
     assert_end_of_stream(pid, :sink, :input)
     :ok = Membrane.Pipeline.terminate(pid)
@@ -294,6 +296,7 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     opus_ts_payload = Membrane.MPEG.TS.OpusPayload.packetize(opus_payload)
 
     muxer = MPEG.TS.Muxer.new()
+
     {pid, muxer} =
       MPEG.TS.Muxer.add_elementary_stream(muxer, :PES_PRIVATE_DATA,
         descriptors: [%{tag: 0x05, data: "Opus"}]
@@ -318,12 +321,14 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
 
     pid = Testing.Pipeline.start_link_supervised!(spec: spec)
     assert_pipeline_notified(pid, :demuxer, {:pmt, %MPEG.TS.PMT{}})
+
     assert_sink_stream_format(pid, :sink, %Membrane.RemoteStream{
       content_format: %Membrane.MPEG.TS.StreamFormat{
         stream_type: :PES_PRIVATE_DATA,
         descriptors: [%{tag: 0x05, data: "Opus"}]
       }
     })
+
     assert_sink_buffer(pid, :sink, %Membrane.Buffer{payload: ^opus_payload})
     assert_end_of_stream(pid, :sink, :input)
     :ok = Testing.Pipeline.terminate(pid)
