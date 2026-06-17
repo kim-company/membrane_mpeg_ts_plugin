@@ -24,3 +24,4 @@ membrane_mpegts_plugin-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+.dexter*
