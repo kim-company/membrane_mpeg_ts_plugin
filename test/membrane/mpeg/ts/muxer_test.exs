@@ -3,7 +3,6 @@ defmodule Membrane.MPEG.TS.MuxerTest do
   import Membrane.Testing.Assertions
   import Membrane.ChildrenSpec
   alias Membrane.Testing
-  require Membrane.Pad
   alias Membrane.MPEG.TS
 
   # Helper function to run tsanalyze and parse JSON output
@@ -684,16 +683,32 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       crc: <<>>
     }
 
-    buffers = [
+    video_buffers = [
+      %Membrane.Buffer{
+        payload: :binary.copy(<<0x01>>, 800),
+        pts: Membrane.Time.seconds(5),
+        metadata: %{is_keyframe?: true}
+      },
+      %Membrane.Buffer{
+        payload: :binary.copy(<<0x02>>, 800),
+        pts: Membrane.Time.seconds(6),
+        metadata: %{is_keyframe?: true}
+      }
+    ]
+
+    scte_buffers = [
       %Membrane.Buffer{
         payload: <<>>,
-        pts: Membrane.Time.seconds(5),
+        pts: Membrane.Time.seconds(7),
         metadata: %{psi: psi}
       }
     ]
 
     spec = [
-      child(:scte_source, %Membrane.Testing.Source{output: buffers})
+      child(:video_source, %Membrane.Testing.Source{output: video_buffers})
+      |> via_in(:input, options: [stream_type: :H264_AVC, pcr?: true])
+      |> get_child(:muxer),
+      child(:scte_source, %Membrane.Testing.Source{output: scte_buffers})
       |> via_in(:input,
         options: [
           stream_type: :SCTE_35_SPLICE,

@@ -382,8 +382,6 @@ defmodule Membrane.MPEG.TS.Demuxer do
       descriptors_match?(stream.descriptors, profile_data.descriptors)
   end
 
-  defp descriptors_match?(_stream_descriptors, nil), do: true
-
   defp descriptors_match?(stream_descriptors, required_descriptors) do
     Enum.all?(required_descriptors, fn required ->
       Enum.any?(stream_descriptors, &(&1 == required))

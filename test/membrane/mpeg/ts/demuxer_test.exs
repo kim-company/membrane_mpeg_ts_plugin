@@ -363,6 +363,45 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     :ok = Testing.Pipeline.terminate(pid)
   end
 
+  test "drops SCTE35 until PES timing is anchored" do
+    spec = [
+      child(:source, %Membrane.Testing.Source{
+        output: [%Membrane.Buffer{payload: ztv_like_scte35_stream()}]
+      })
+      |> child(:demuxer, Membrane.MPEG.TS.Demuxer),
+      get_child(:demuxer)
+      |> via_out(:output, options: [stream_type: :SCTE_35_SPLICE])
+      |> child(:sink, Membrane.Testing.Sink)
+    ]
+
+    pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_sink_stream_format(pid, :sink, %Membrane.RemoteStream{
+      content_format: %Membrane.MPEG.TS.StreamFormat{
+        stream_type: :SCTE_35_SPLICE
+      }
+    })
+
+    assert_sink_buffer(pid, :sink, %Membrane.Buffer{
+      dts: dts,
+      metadata: %{
+        psi: %MPEG.TS.PSI{
+          table_type: :scte35,
+          table: %MPEG.TS.SCTE35{
+            splice_command_type: :splice_null,
+            splice_command: %MPEG.TS.SCTE35.SpliceNull{}
+          }
+        }
+      }
+    })
+
+    assert is_integer(dts)
+
+    assert_end_of_stream(pid, :sink, :input)
+    refute_sink_buffer(pid, :sink, %Membrane.Buffer{}, 100)
+    :ok = Testing.Pipeline.terminate(pid)
+  end
+
   @tag :tmp_dir
   test "demuxes zee-dump.ts by PIDs (production stream with errors)", %{tmp_dir: tmp_dir} do
     # This test uses a real production TS file (zee-dump.ts) that has parsing issues
@@ -486,6 +525,70 @@ defmodule Membrane.MPEG.TS.DemuxerTest do
     assert {:ok, b} = File.read(file_b)
     assert byte_size(a) == byte_size(b)
     assert a == b
-    assert a > 0
+    assert byte_size(a) > 0
+  end
+
+  defp ztv_like_scte35_stream do
+    muxer = TS.Muxer.new()
+    {video_pid, muxer} = TS.Muxer.add_elementary_stream(muxer, :H264_AVC, pid: 0x100)
+
+    {scte_pid, muxer} =
+      TS.Muxer.add_elementary_stream(muxer, :SCTE_35_SPLICE,
+        program_info: [%{tag: 0x05, data: "CUEI"}],
+        pid: 500
+      )
+
+    {pat, muxer} = TS.Muxer.mux_pat(muxer)
+    {pmt, muxer} = TS.Muxer.mux_pmt(muxer)
+    psi = scte35_splice_null_psi()
+
+    {early_scte, muxer} = TS.Muxer.mux_psi(muxer, scte_pid, psi)
+
+    {video_packets, muxer} =
+      TS.Muxer.mux_sample(
+        muxer,
+        video_pid,
+        :binary.copy(<<0x01>>, 800),
+        Membrane.Time.seconds(5),
+        sync?: true
+      )
+
+    {next_video_packets, muxer} =
+      TS.Muxer.mux_sample(
+        muxer,
+        video_pid,
+        :binary.copy(<<0x02>>, 800),
+        Membrane.Time.seconds(6),
+        sync?: true
+      )
+
+    {timed_scte, _muxer} = TS.Muxer.mux_psi(muxer, scte_pid, psi)
+
+    ([pat, pmt, early_scte] ++ video_packets ++ next_video_packets ++ [timed_scte])
+    |> TS.Marshaler.marshal()
+    |> IO.iodata_to_binary()
+  end
+
+  defp scte35_splice_null_psi do
+    scte35 = %MPEG.TS.SCTE35{
+      protocol_version: 0,
+      encrypted_packet: 0,
+      encryption_algorithm: 0,
+      pts_adjustment: 0,
+      cw_index: 0,
+      tier: 0xFFF,
+      splice_command_type: :splice_null,
+      splice_command: %MPEG.TS.SCTE35.SpliceNull{},
+      splice_descriptors: [],
+      e_crc32: <<>>
+    }
+
+    %MPEG.TS.PSI{
+      header: %{
+        table_id: 0xFC,
+        section_syntax_indicator: false
+      },
+      table: scte35
+    }
   end
 end
