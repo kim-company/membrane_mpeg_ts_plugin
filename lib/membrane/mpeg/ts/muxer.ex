@@ -20,11 +20,12 @@ defmodule Membrane.MPEG.TS.Muxer do
   Rather than crashing (as `TimestampQueue` requires monotonic per-pad timestamps),
   the muxer applies best-effort sanitization for these streams:
 
-    * **Clamp**: when `buffer.pts < last_pts` but the buffer still has remaining
-      duration (`metadata.to > last_pts`), `pts` is clamped to `last_pts`.
-    * **Drop**: when the buffer is entirely in the past (`metadata.to <= last_pts`),
-      or when `metadata.to` is absent and `buffer.pts < last_pts`, the buffer is
-      dropped.
+    * **Clamp**: when `dts || pts` is earlier than the last timestamp on the pad,
+      but the buffer still has remaining duration (`metadata.to > last_ts`), the
+      timestamp field used by that buffer is clamped to `last_ts`.
+    * **Drop**: when the buffer is entirely in the past (`metadata.to <= last_ts`),
+      or when `metadata.to` is absent and the buffer timestamp regresses, the
+      buffer is dropped.
 
   Both cases emit a warning log. Audio and video pads are never sanitized — an
   out-of-order buffer on those pads indicates a serious upstream bug and will
@@ -212,61 +213,85 @@ defmodule Membrane.MPEG.TS.Muxer do
   # Sanitize timestamps for non-AV pads. Audio/video pads pass through unchanged
   # (out-of-order on those is a serious upstream bug). For other categories,
   # out-of-order buffers are clamped or dropped to prevent TimestampQueue crashes.
+  #
+  # Non-AV streams are not guaranteed to be PTS-only. SCTE-35 PSI buffers emitted
+  # by the demuxer are DTS-only because PSI has no native PES presentation time;
+  # the demuxer attaches a best-effort mux-order timestamp derived from the PES
+  # timeline. Track and sanitize the actual Membrane timestamp (`dts || pts`).
   defp maybe_sanitize_ts(pad, %Membrane.Buffer{} = buffer, state) do
     stream = Map.get(state.pad_to_stream, pad)
+    timestamp = buffer_timestamp(buffer)
 
     if stream == nil or stream.category in [:audio, :video] do
-      # AV pads or unknown pads: pass through, update last_pts
-      state = maybe_update_last_pts(state, pad, buffer.pts)
+      # AV pads or unknown pads: pass through, update last_ts
+      state = maybe_update_last_ts(state, pad, timestamp)
       {:ok, buffer, state}
     else
-      last_pts = stream.last_pts
+      last_ts = stream.last_ts
 
-      if last_pts == nil or buffer.pts == nil or buffer.pts >= last_pts do
+      if last_ts == nil or timestamp == nil or timestamp >= last_ts do
         # First buffer on this pad or in-order: pass through
-        state = maybe_update_last_pts(state, pad, buffer.pts)
+        state = maybe_update_last_ts(state, pad, timestamp)
         {:ok, buffer, state}
       else
         # Out-of-order: check if buffer has remaining duration via metadata.to
-        handle_out_of_order_buffer(buffer, stream, last_pts, pad, state)
+        handle_out_of_order_buffer(buffer, stream, last_ts, timestamp, pad, state)
       end
     end
   end
 
-  defp handle_out_of_order_buffer(%Membrane.Buffer{} = buffer, stream, last_pts, _pad, state) do
+  defp handle_out_of_order_buffer(
+         %Membrane.Buffer{} = buffer,
+         stream,
+         last_ts,
+         timestamp,
+         _pad,
+         state
+       ) do
     buffer_to = get_in(buffer.metadata, [:to])
-    delta_ms = div(last_pts - buffer.pts, 1_000_000)
+    delta_ms = div(last_ts - timestamp, 1_000_000)
 
-    if is_integer(buffer_to) and buffer_to > last_pts do
-      # Buffer partially in the past — clamp pts to last_pts
+    if is_integer(buffer_to) and buffer_to > last_ts do
+      # Buffer partially in the past — clamp timestamp to last_ts
       Membrane.Logger.warning(
         "Clamped out-of-order buffer on PID #{stream.pid} (#{inspect(stream.type)}): " <>
-          "pts #{buffer.pts} < last_pts #{last_pts}, delta #{delta_ms}ms"
+          "timestamp #{timestamp} < last_ts #{last_ts}, delta #{delta_ms}ms"
       )
 
-      clamped = %Membrane.Buffer{buffer | pts: last_pts}
+      clamped = clamp_buffer_timestamp(buffer, last_ts)
       {:ok, clamped, state}
     else
-      # Buffer entirely in the past (to <= last_pts) or no duration info — drop
+      # Buffer entirely in the past (to <= last_ts) or no duration info — drop
       reason =
         if is_integer(buffer_to),
-          do: "to #{buffer_to} <= last_pts #{last_pts}",
+          do: "to #{buffer_to} <= last_ts #{last_ts}",
           else: "no duration info"
 
       Membrane.Logger.warning(
         "Dropped out-of-order buffer on PID #{stream.pid} (#{inspect(stream.type)}): " <>
-          "pts #{buffer.pts} < last_pts #{last_pts}, delta #{delta_ms}ms (#{reason})"
+          "timestamp #{timestamp} < last_ts #{last_ts}, delta #{delta_ms}ms (#{reason})"
       )
 
       {:drop, state}
     end
   end
 
-  defp maybe_update_last_pts(state, pad, pts) when is_integer(pts) do
-    put_in(state, [:pad_to_stream, pad, :last_pts], pts)
+  defp buffer_timestamp(%Membrane.Buffer{dts: nil, pts: pts}), do: pts
+  defp buffer_timestamp(%Membrane.Buffer{dts: dts}), do: dts
+
+  defp clamp_buffer_timestamp(%Membrane.Buffer{dts: nil} = buffer, timestamp) do
+    %Membrane.Buffer{buffer | pts: timestamp}
   end
 
-  defp maybe_update_last_pts(state, _pad, _pts), do: state
+  defp clamp_buffer_timestamp(%Membrane.Buffer{} = buffer, timestamp) do
+    %Membrane.Buffer{buffer | dts: timestamp}
+  end
+
+  defp maybe_update_last_ts(state, pad, timestamp) when is_integer(timestamp) do
+    put_in(state, [:pad_to_stream, pad, :last_ts], timestamp)
+  end
+
+  defp maybe_update_last_ts(state, _pad, _timestamp), do: state
 
   defp handle_queue_output({suggested_actions, items, queue}, ctx, state) do
     state = %{state | queue: queue}
@@ -477,7 +502,7 @@ defmodule Membrane.MPEG.TS.Muxer do
         packetizer: profile_data[:packetizer],
         descriptors: descriptors,
         upstream_format: upstream_format,
-        last_pts: nil
+        last_ts: nil
       })
       |> update_in(
         [:queue],

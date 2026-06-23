@@ -1027,7 +1027,7 @@ defmodule Membrane.MPEG.TS.MuxerTest do
       output_path = Path.join(tmp_dir, "clamp.ts")
 
       # Buffer 1: pts=5s, to=6s
-      # Buffer 2: pts=4s, to=7s (out-of-order, but to > last_pts so it gets clamped)
+      # Buffer 2: pts=4s, to=7s (out-of-order, but to > last_ts so it gets clamped)
       # Buffer 3: pts=8s (in-order after clamp)
       buffers = [
         %Membrane.Buffer{
@@ -1103,8 +1103,8 @@ defmodule Membrane.MPEG.TS.MuxerTest do
     test "drops out-of-order buffer when entirely in the past", %{tmp_dir: tmp_dir} do
       output_path = Path.join(tmp_dir, "drop.ts")
 
-      # Buffer 1: pts=5s, to=6s — last_pts becomes 5s
-      # Buffer 2: pts=4s, to=5s — entirely in the past (to <= last_pts), dropped
+      # Buffer 1: pts=5s, to=6s — last_ts becomes 5s
+      # Buffer 2: pts=4s, to=5s — entirely in the past (to <= last_ts), dropped
       # Buffer 3: pts=7s — in-order, passes through
       buffers = [
         %Membrane.Buffer{
@@ -1243,6 +1243,80 @@ defmodule Membrane.MPEG.TS.MuxerTest do
 
       assert_end_of_stream(demux_pid, :sink, :input)
       :ok = Testing.Pipeline.terminate(demux_pid)
+    end
+
+    @tag :tmp_dir
+    test "sanitizes dts-only SCTE buffers", %{tmp_dir: tmp_dir} do
+      output_path = Path.join(tmp_dir, "scte_dts_clamp.ts")
+
+      scte35 = %MPEG.TS.SCTE35{
+        protocol_version: 0,
+        encrypted_packet: 0,
+        encryption_algorithm: 0,
+        pts_adjustment: 0,
+        cw_index: 0,
+        tier: 0xFFF,
+        splice_command_type: :splice_null,
+        splice_command: %MPEG.TS.SCTE35.SpliceNull{},
+        splice_descriptors: [],
+        e_crc32: <<>>
+      }
+
+      psi = %MPEG.TS.PSI{
+        header: %{
+          table_id: 0xFC,
+          section_syntax_indicator: false,
+          transport_stream_id: nil,
+          version_number: nil,
+          current_next_indicator: nil,
+          section_number: nil,
+          last_section_number: nil
+        },
+        table_type: :scte35,
+        table: scte35,
+        crc: <<>>
+      }
+
+      # SCTE buffers produced by the demuxer carry dts, not pts. The middle
+      # buffer simulates a timestamp regression; without dts-aware sanitization,
+      # TimestampQueue rejects it before the muxer can clamp it.
+      buffers = [
+        %Membrane.Buffer{
+          payload: <<>>,
+          dts: Membrane.Time.seconds(5),
+          metadata: %{psi: psi, to: Membrane.Time.seconds(6)}
+        },
+        %Membrane.Buffer{
+          payload: <<>>,
+          dts: Membrane.Time.seconds(4),
+          metadata: %{psi: psi, to: Membrane.Time.seconds(7)}
+        },
+        %Membrane.Buffer{
+          payload: <<>>,
+          dts: Membrane.Time.seconds(8),
+          metadata: %{psi: psi, to: Membrane.Time.seconds(9)}
+        }
+      ]
+
+      spec = [
+        child(:scte_source, %Testing.Source{output: buffers})
+        |> via_in(:input,
+          options: [
+            stream_type: :SCTE_35_SPLICE,
+            pid: 500,
+            wait_on_buffers?: false
+          ]
+        )
+        |> get_child(:muxer),
+        child(:muxer, Membrane.MPEG.TS.Muxer)
+        |> child(:sink, %Membrane.File.Sink{location: output_path})
+      ]
+
+      pid = Testing.Pipeline.start_link_supervised!(spec: spec)
+      assert_end_of_stream(pid, :sink)
+      :ok = Testing.Pipeline.terminate(pid)
+
+      assert File.stat!(output_path).size > 0
     end
 
     @tag :tmp_dir
